@@ -66,6 +66,7 @@ class TestInject(unittest.TestCase):
         p.secret = "sec"
         p.settings = dict(m.DEFAULT_SETTINGS)
         p.hub_ports = (7890, 7891, 7892)
+        p.last_delays = {}
         p.local = {"uuid": "u-1", "path": "/ws-x", "mixed_port": 7893, "vless_port": 17990, "cfws_port": 8443, "cf_base": "example.live"}
         p.local_path = os.path.join(tempfile.gettempdir(), "mpool-test-local-%d.json" % os.getpid())
         p.log = lambda s: None
@@ -96,6 +97,76 @@ class TestInject(unittest.TestCase):
         self.assertEqual(p.node_display_name("1.2.3.4"), "1.2.3.4")
         p.settings["node_name"] = "家庭宽带"
         self.assertEqual(p.node_display_name("1.2.3.4"), "家庭宽带")
+
+    def test_port_order_alive_first(self):
+        p = TestInject._fake_pool(self)
+        p.last_delays = {"fast": 80, "slow": 400, "dead": "x"}
+        order = p._port_order(["dead", "slow", "unknown-node", "fast", "zz"])
+        self.assertEqual(order[:2], ["fast", "slow"])
+        self.assertEqual(order[2:4], ["unknown-node", "zz"])
+        self.assertEqual(order[-1], "dead")
+
+    def test_remap_ports_to_alive(self):
+        import yaml as _yaml
+        p = TestInject._fake_pool(self)
+        d = tempfile.mkdtemp()
+        p.runtime_path = os.path.join(d, "config.yaml")
+        p.runtime_dir = d
+        with open(p.runtime_path, "w", encoding="utf-8") as fh:
+            _yaml.safe_dump({"proxies": [], "listeners": []}, fh)
+        p.listen_base = 17901
+        p.listen_max = 32
+        p.port_map = {"dead-a": 17901, "alive-b": 17902, "dead-c": 17903, "dead-d": 17904}
+
+        class C:
+            def __init__(self):
+                self.loaded = []
+                self.sel = {}
+            def load_config(self, path):
+                self.loaded.append(path)
+            def selected(self, g):
+                return self.sel.get(g, "dead-x")
+            def select(self, g, n):
+                self.sel[g] = n
+        p.ctrl = C()
+        p.log = lambda s: None
+        alive = {"alive-b": 100, "new-1": 120, "new-2": 200, "new-3": 300}
+        p._remap_ports_to_alive(alive)
+        self.assertEqual(sorted(p.port_map.values()), [17901, 17902, 17903, 17904])
+        self.assertEqual(p.port_map["alive-b"], 17902)
+        self.assertNotIn("dead-a", p.port_map)
+        self.assertEqual({p.port_map[n] for n in ("new-1", "new-2", "new-3")}, {17901, 17903, 17904})
+        self.assertEqual(len(p.ctrl.loaded), 1)
+        doc = _yaml.safe_load(open(p.runtime_path, encoding="utf-8"))
+        by_port = {l["port"]: l["proxy"] for l in doc["listeners"] if l["name"].startswith("HUB-E")}
+        self.assertEqual(by_port[17902], "alive-b")
+        self.assertNotIn("dead-a", by_port.values())
+
+    def test_remap_expands_pool_and_trims_dead(self):
+        p = TestInject._fake_pool(self)
+        p.listen_base = 17901
+        p.listen_max = 4
+        p.port_map = {"dead-a": 17901, "dead-b": 17902, "dead-c": 17903, "dead-d": 17904}
+
+        class C:
+            def selected(self, g):
+                return "x-dead"
+            def select(self, g, n):
+                pass
+            def load_config(self, path):
+                pass
+        p.ctrl = C()
+        p.log = lambda s: None
+        p.runtime_path = os.path.join(tempfile.mkdtemp(), "config.yaml")
+        with open(p.runtime_path, "w", encoding="utf-8") as fh:
+            __import__("yaml").safe_dump({"proxies": [], "listeners": []}, fh)
+        alive = {"n%d" % i: 100 + i for i in range(10)}
+        p._remap_ports_to_alive(alive)
+        self.assertEqual(len(p.port_map), 4)
+        self.assertEqual(set(p.port_map.values()), {17901, 17902, 17903, 17904})
+        self.assertTrue(all(n in alive for n in p.port_map))
+        best = sorted(alive, key=alive.get)[:4]
+        self.assertEqual(set(p.port_map), set(best))
 
     def test_singbox_config_hub_bridges(self):
         p = TestInject._fake_pool(self)

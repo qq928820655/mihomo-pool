@@ -210,6 +210,7 @@ class Pool:
         self.node_list = []
         self.node_types = {}
         self.port_map = {}
+        self.last_delays = self._load_last_delays()
         self.proc = None
         self.runtime_ok = False
         self.last_error = ""
@@ -222,6 +223,34 @@ class Pool:
         self._auto_thread = None
         self._next_auto = 0.0
         self.last_auto_test = None
+
+    def _last_delays_path(self):
+        return os.path.join(self.runtime_dir, "last_delays.json")
+
+    def _load_last_delays(self):
+        try:
+            with open(self._last_delays_path(), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_last_delays(self, mapping):
+        try:
+            with open(self._last_delays_path(), "w", encoding="utf-8") as fh:
+                json.dump(mapping, fh)
+        except OSError:
+            pass
+
+    def _port_order(self, names):
+        if not self.last_delays:
+            return names
+        alive = {n: v for n, v in self.last_delays.items() if isinstance(v, int)}
+        dead = {n for n, v in self.last_delays.items() if v == "x"}
+        order = sorted(alive, key=alive.get)
+        order += [n for n in names if n not in alive and n not in dead]
+        order += sorted(n for n in names if n in dead)
+        return order
 
     def _load_secret(self):
         if os.path.exists(self.secret_path):
@@ -619,7 +648,7 @@ class Pool:
                     g["proxies"] = list(names) + ["DIRECT"]
         listeners = self._hub_listeners() + self._local_listeners()
         port_map = {}
-        for idx, name in enumerate(names[: self.listen_max]):
+        for idx, name in enumerate(self._port_order(names)[: self.listen_max]):
             port = self.listen_base + idx
             listeners.append(
                 {"name": "HUB-E%02d" % (idx + 1), "type": "mixed", "port": port, "proxy": name}
@@ -763,12 +792,20 @@ class Pool:
                 timeout_ms = min(3000, max(1000, int(self.settings["max_ms"]) * 3))
             res = self.ctrl.group_delay(GROUP_ROTATE, url, timeout_ms)
             self.cache.bulk_put({n: res.get(n) for n in self.node_list})
+            snapshot = {}
+            for n in self.node_list:
+                v = res.get(n)
+                snapshot[n] = v if isinstance(v, int) else "x"
+            self.last_delays = snapshot
+            self._save_last_delays(snapshot)
             alive = {
                 n: v
                 for n, v in res.items()
                 if n in self.node_list and isinstance(v, int) and v <= int(self.settings["max_ms"])
             }
+            reachable = {n: v for n, v in res.items() if n in self.node_list and isinstance(v, int)}
             self._reselect_alive_defaults(alive)
+            self._remap_ports_to_alive(reachable)
             return {n: res[n] for n in self.node_list if n in res}
 
     def _reselect_alive_defaults(self, alive):
@@ -797,6 +834,46 @@ class Pool:
             pick_node = sorted(alive)[stable_index("default", len(alive))]
             self.ctrl.select(GROUP_ASSIGN, pick_node)
             self.log("assign exit auto-fallback -> %s (previous %r unreachable)" % (pick_node, assign_now))
+
+    def _remap_ports_to_alive(self, alive):
+        if not alive or not self.port_map:
+            return
+        old_map = dict(self.port_map)
+        want = min(self.listen_max, len(alive))
+        pool = sorted(set(old_map.values()))
+        used = set(pool)
+        nxt = self.listen_base
+        while len(pool) < want:
+            if nxt not in used:
+                pool.append(nxt)
+                used.add(nxt)
+            nxt += 1
+        pool = sorted(pool)[:want]
+        new_map = {n: p for n, p in old_map.items() if n in alive and p in pool}
+        free = [p for p in pool if p not in set(new_map.values())]
+        for n in sorted(alive, key=alive.get):
+            if not free:
+                break
+            if n in new_map:
+                continue
+            new_map[n] = free.pop(0)
+        if new_map == old_map:
+            return
+        try:
+            with open(self.runtime_path, "r", encoding="utf-8") as fh:
+                doc = yaml.safe_load(fh)
+            listeners = self._hub_listeners() + self._local_listeners()
+            for i, (node, port) in enumerate(sorted(new_map.items(), key=lambda kv: kv[1])):
+                listeners.append({"name": "HUB-E%02d" % (i + 1), "type": "mixed", "port": port, "proxy": node})
+            doc["listeners"] = listeners
+            self._dump(doc, self.runtime_path)
+            self.ctrl.load_config(self.runtime_path)
+        except Exception as exc:
+            self.log("port remap failed: %s" % exc)
+            return
+        self.port_map = new_map
+        self._reselect_alive_defaults(alive)
+        self.log("port remap: %d alive ports (was %d) -> %s..." % (len(new_map), len(old_map), ", ".join("%s->%d" % (n, p) for n, p in sorted(new_map.items(), key=lambda kv: kv[1])[:3])))
 
     def gate(self, keywords=None, max_ms=None, refresh=False):
         kw = self.settings["keywords"] if keywords is None else keywords
