@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mihomo-pool 出口池</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2330;--line:#2a3140;--fg:#e6edf3;--dim:#8b98a9;--acc:#4f8cff;--ok:#3fb950;--warn:#d29922;--err:#f85149;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;min-height:100vh}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:17px;font-weight:600}
+header .dot{width:9px;height:9px;border-radius:50%;background:var(--err);display:inline-block;margin-right:6px}
+header .dot.on{background:var(--ok)}
+.ver{color:var(--dim);font-size:12px}
+nav{display:flex;gap:4px;padding:10px 20px 0;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+nav button{background:none;border:none;color:var(--dim);padding:8px 14px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent}
+nav button.act{color:var(--fg);border-bottom-color:var(--acc)}
+main{padding:18px 20px;max-width:1180px;margin:0 auto}
+.page{display:none}.page.act{display:block}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card .k{color:var(--dim);font-size:12px}.card .v{font-size:19px;font-weight:600;margin-top:2px;word-break:break-all}
+.card .v.small{font-size:13px;font-weight:400}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+button.btn{background:var(--acc);color:#fff;border:none;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px}
+button.btn.gray{background:var(--panel2);border:1px solid var(--line);color:var(--fg)}
+button.btn.mini{padding:3px 9px;font-size:12px;border-radius:6px}
+input,textarea,select{background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:7px 10px;font-size:13px}
+input:focus,textarea:focus{outline:1px solid var(--acc)}
+input[type=number]{width:110px}
+textarea{width:100%;min-height:110px;font-family:ui-monospace,monospace}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);font-size:13px;word-break:break-all}
+th{background:var(--panel2);color:var(--dim);font-weight:500;position:sticky;top:0}
+td.d-ok{color:var(--ok)}td.d-bad{color:var(--err)}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:16px}
+.box h3{font-size:14px;margin-bottom:10px;color:var(--fg)}
+.box .hint{color:var(--dim);font-size:12px;margin-top:8px}
+.muted{color:var(--dim)}.ok{color:var(--ok)}.err{color:var(--err)}.warn{color:var(--warn)}
+pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:12px;overflow-x:auto;font-family:ui-monospace,monospace;margin:8px 0;white-space:pre-wrap}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 18px;font-size:13px;display:none;z-index:9;max-width:80vw}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:720px){.grid2{grid-template-columns:1fr}}
+label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:13px;color:var(--dim)}
+.badge{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;background:var(--panel2);border:1px solid var(--line);color:var(--dim)}
+.badge.on{color:var(--ok);border-color:var(--ok)}
+</style>
+</head>
+<body>
+<header>
+  <span><span class="dot" id="dot"></span><b>mihomo-pool</b> <span class="ver" id="ver"></span></span>
+  <span style="flex:1"></span>
+  <input id="token" placeholder="API Token" style="width:180px" onchange="localStorage.setItem('mpool_token',this.value)">
+</header>
+<nav id="nav">
+  <button data-p="home" class="act">概览</button>
+  <button data-p="nodes">节点</button>
+  <button data-p="import">导入</button>
+  <button data-p="settings">设置</button>
+  <button data-p="local">本地节点</button>
+  <button data-p="api">API</button>
+</nav>
+<main>
+  <div class="page act" id="p-home">
+    <div class="cards">
+      <div class="card"><div class="k">运行状态</div><div class="v" id="c-run">—</div></div>
+      <div class="card"><div class="k">节点数 / 已映射端口</div><div class="v" id="c-nodes">—</div></div>
+      <div class="card"><div class="k">7890 固定出口</div><div class="v small" id="c-fixed">—</div></div>
+      <div class="card"><div class="k">7891 轮换出口</div><div class="v small" id="c-rotate">—</div></div>
+      <div class="card"><div class="k">7892 分配出口</div><div class="v small" id="c-assign">—</div></div>
+      <div class="card"><div class="k">门限内可用（缓存）</div><div class="v" id="c-fresh">—</div></div>
+    </div>
+    <div class="row">
+      <button class="btn" onclick="testAll()">测速全部</button>
+      <button class="btn gray" onclick="rotateNow()">立即轮换</button>
+      <button class="btn gray" onclick="doReload()">重载配置</button>
+      <button class="btn gray" onclick="refresh()">刷新</button>
+      <span id="home-msg" class="muted"></span>
+    </div>
+    <div class="box" id="src-box" style="display:none">
+      <h3>当前配置</h3><div id="src-info" class="muted" style="font-size:13px"></div>
+      <div id="src-err" class="err" style="font-size:13px;margin-top:4px"></div>
+    </div>
+  </div>
+  <div class="page" id="p-nodes">
+    <div class="row">
+      <input id="kw" placeholder="关键词过滤（逗号分隔，空=用设置里的）" style="flex:1;min-width:200px">
+      <button class="btn gray" onclick="loadNodes()">过滤</button>
+      <button class="btn" onclick="testAll()">测速全部</button>
+    </div>
+    <div style="max-height:62vh;overflow:auto">
+    <table><thead><tr><th>节点</th><th>类型</th><th>延迟</th><th>端口</th><th>门限</th><th></th></tr></thead>
+    <tbody id="nodes-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody></table>
+    </div>
+  </div>
+  <div class="page" id="p-import">
+    <div class="box"><h3>① URL 订阅导入</h3>
+      <div class="row"><input id="imp-url" placeholder="https://.../config.yaml" style="flex:1;min-width:240px"><button class="btn" onclick="impUrl()">导入并重载</button></div>
+      <div class="hint">拉取远端 Clash/mihomo 配置（≤10MB），保存为 source.yaml 后自动注入 HUB 组与监听端口并热重载。</div>
+    </div>
+    <div class="box"><h3>② 上传文件</h3>
+      <div class="row"><input type="file" id="imp-file" accept=".yaml,.yml,.txt" style="color:var(--dim)"><button class="btn" onclick="impFile()">导入并重载</button></div>
+    </div>
+    <div class="box"><h3>③ 粘贴文本</h3>
+      <textarea id="imp-paste" placeholder="粘贴完整 config.yaml 内容"></textarea>
+      <div class="row" style="margin-top:8px"><input id="imp-paste-name" placeholder="名称（可选）" style="width:200px"><button class="btn" onclick="impPaste()">导入并重载</button></div>
+    </div>
+    <div class="box"><h3>④ 服务器本地路径</h3>
+      <div class="row"><input id="imp-path" placeholder="/workspace/xxx/config.yaml" style="flex:1;min-width:240px"><button class="btn" onclick="impPath()">导入并重载</button></div>
+    </div>
+    <div class="box"><h3>历史版本</h3>
+      <table><thead><tr><th>文件</th><th>大小</th><th></th></tr></thead><tbody id="hist-body"><tr><td colspan="3" class="muted">—</td></tr></tbody></table>
+      <div class="hint">每次导入自动留档到 configs/history/（最多展示 50 条）。</div>
+    </div>
+  </div>
+  <div class="page" id="p-settings">
+    <div class="box"><h3>轮换与门限</h3>
+      <div class="grid2">
+        <label class="f">本地节点名称（默认=服务器IP，用于 yaml/订阅里的节点名）<input id="s-nname" placeholder="如：家庭宽带"></label>
+        <label class="f">门限 max_ms（延迟上限，7891 轮换与 API 分配都只挑 ≤ 该值的节点）<input type="number" id="s-max" min="50" max="10000"></label>
+        <label class="f">轮换间隔 interval_s（7891 每隔多少秒随机换一个出口）<input type="number" id="s-int" min="5" max="86400"></label>
+        <label class="f">默认关键词 keywords（逗号分隔，命中任一即可，如：家庭,香港）<input id="s-kw" placeholder="家庭,香港"></label>
+        <label class="f">缓存有效期 ttl_s（测速结果缓存秒数）<input type="number" id="s-ttl" min="5" max="600"></label>
+        <label class="f">测速 URL<input id="s-url"></label>
+      </div>
+      <div class="row"><button class="btn" onclick="saveSettings()">保存设置</button><span id="set-msg" class="muted"></span></div>
+    </div>
+    <div class="box"><h3>说明</h3>
+      <div class="muted" style="font-size:13px">
+        7890 固定出口：在「节点」页点「设为固定」，重载后自动恢复。<br>
+        7891 动态轮换：每 interval_s 秒在「关键词命中 + 延迟 ≤ max_ms」的节点里随机换一个。<br>
+        7892 分配出口：调用 API 传入 key（如账号 ID），同一 key 稳定映射到同一节点。<br>
+        17901+ 逐节点端口：每个节点一个独享端口，供 CPA/Hub 按端口绑定账号（自动发现前 10 个）。
+      </div>
+    </div>
+  </div>
+    <div class="box"><h3>一键导入本地节点（出口 = 本机 DIRECT）</h3>
+      <div class="muted" style="font-size:13px" id="local-note"></div>
+      <div class="row" style="margin-top:10px">
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px;margin:0">节点名称
+          <input id="node-name" placeholder="默认=服务器IP" style="width:200px">
+          <button class="btn mini" onclick="saveNodeName()">保存名称</button>
+          <span id="nn-msg" class="muted"></span>
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <a class="btn" href="/local-node.yaml" download="local-node.yaml">⬇ 下载节点 yaml（含 CF+直连双节点）</a>
+        <span class="muted">或订阅（clash → 配置 → 新建 → URL，可自动更新）：</span>
+      </div>
+      <div class="row"><input id="sub-url" readonly style="flex:1;min-width:260px"><button class="btn mini gray" onclick="copyText($('#sub-url').value)">复制订阅地址</button></div>
+      <div class="row"><input id="vmess-cf" readonly style="flex:1;min-width:260px"><button class="btn mini gray" onclick="copyText($('#vmess-cf').value)">复制 vmess:// (CF, 推荐)</button></div>
+      <div class="row"><input id="vmess-direct" readonly style="flex:1;min-width:260px"><button class="btn mini gray" onclick="copyText($('#vmess-direct').value)">复制 vmess:// (直连IP)</button><span class="muted">Clash Verge/v2rayN 剪贴板导入</span></div>
+    </div>
+    <div class="box"><h3>合并到你的机场订阅（推荐：机场流量照常，需要时切本地节点）</h3>
+      <div class="row"><input id="merge-url" placeholder="粘贴你的机场订阅 URL（clash yaml 格式）" style="flex:1;min-width:240px" oninput="updMerge()"><a class="btn" id="merge-dl" download="local-merged.yaml">⬇ 生成并下载合并 yaml</a></div>
+      <div class="row"><input id="merge-sub" readonly style="flex:1;min-width:240px"><button class="btn mini gray" onclick="copyText($('#merge-sub').value)">复制合并订阅地址</button></div>
+      <div class="hint">合并订阅可作为 clash 配置长期使用（自动更新）：保留你订阅的全部节点与分组，并把「CF(推荐)/直连IP」注入名称含 proxy/节点/选择 的手动选择组。测速慢属预期：本平台 CF 通道实测 ~500KB/s，日常浏览可用，大流量请走机场或让平台放行直连端口。</div>
+    </div>
+    <div class="box"><h3>节点参数（手工添加用）</h3>
+      <pre id="snip-clash"></pre>
+      <div class="row"><button class="btn mini gray" onclick="copyText($('#snip-clash').textContent)">复制</button><span class="muted" id="local-ports"></span></div>
+      <div class="hint">端口换服务器部署后自动适配：公网 IP 走 api.ipify.org 探测（缓存 10 分钟）；CF 域名从访问请求的 Host 自动学习；订阅地址按当前访问域名生成。</div>
+    </div>
+  </div>
+  <div class="page" id="p-api">
+    <div class="box"><h3>调用示例</h3>
+      <div class="hint">BASE = 当前访问地址；鉴权方式三选一：Authorization: Bearer &lt;token&gt; / X-Token 头 / ?token=</div>
+      <pre id="api-snippets"></pre>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+function token(){return $('#token').value||localStorage.getItem('mpool_token')||''}
+$('#token').value=token();
+async function api(path,opt={}){
+  const r=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-Token':token(),...(opt.headers||{})}});
+  let d={};try{d=await r.json()}catch(e){}
+  if(!r.ok||d.ok===false)throw new Error(d.error||('HTTP '+r.status));
+  return d;
+}
+function toast(msg,bad){const t=$('#toast');t.textContent=msg;t.style.borderColor=bad?'var(--err)':'var(--line)';t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',3200)}
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+document.getElementById('nav').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  document.querySelectorAll('#nav button').forEach(x=>x.classList.toggle('act',x===b));
+  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('act',p.id==='p-'+b.dataset.p));
+  if(b.dataset.p==='nodes')loadNodes().catch(()=>{});
+  if(b.dataset.p==='import')loadHistory();
+  if(b.dataset.p==='local')loadLocal();
+});
+$('#token').addEventListener('change',()=>{refresh().catch(()=>{});loadNodes().catch(()=>{})});
+let STATUS={};
+async function refresh(){
+  try{
+    const d=await api('/api/v1/status');STATUS=d.status;const s=d.status;
+    $('#dot').className='dot'+(s.runtime_ok?' on':'');
+    $('#ver').textContent=s.mihomo_version?('mihomo '+s.mihomo_version):'';
+    $('#c-run').innerHTML=s.runtime_ok?'<span class="ok">运行中</span>':'<span class="err">未就绪</span>';
+    $('#c-run').title=s.last_error||'';
+    $('#c-nodes').textContent=s.node_count+' / '+s.node_ports;
+    $('#c-fixed').textContent=s.fixed_now||'（DIRECT 默认）';
+    $('#c-rotate').textContent=s.rotate_now||'—';
+    $('#c-assign').textContent=s.assign_now||'—';
+    $('#c-fresh').textContent=s.cache_fresh;
+    if(s.source){$('#src-box').style.display='block';$('#src-info').textContent=`${s.source.name} · ${s.source.size}B · sha:${s.source.sha256} · 导入于 ${s.source.imported_at}`;}
+    $('#src-err').textContent=s.last_error||'';
+    const st=await api('/api/v1/settings');const x=st.settings;
+    $('#s-nname').value=x.node_name||'';$('#s-max').value=x.max_ms;$('#s-int').value=x.interval_s;$('#s-kw').value=x.keywords;$('#s-ttl').value=x.ttl_s;$('#s-url').value=x.test_url;
+    buildApi();
+  }catch(e){toast('加载失败: '+e.message,1)}
+}
+async function loadNodes(){
+  const kw=$('#kw').value.trim();
+  const d=await api('/api/v1/nodes'+(kw?'?keywords='+encodeURIComponent(kw):''));
+  const max=STATUS.settings?STATUS.settings.max_ms:500;
+  $('#nodes-body').innerHTML=d.nodes.length?d.nodes.map(n=>{
+    let dcls,dtxt;
+    if(n.delay_ms==null){dcls='d-bad';dtxt='超时/未测'}
+    else{dcls=n.delay_ms<=max?'d-ok':'d-bad';dtxt=n.delay_ms+'ms'}
+    return `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${n.listener_port??'—'}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td><button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button></td></tr>`;
+  }).join(''):'<tr><td colspan="6" class="muted">没有节点</td></tr>';
+}
+async function setFixed(btn){
+  try{const d=await api('/api/v1/fixed',{method:'POST',body:JSON.stringify({node:btn.dataset.n})});toast('固定出口 → '+d.node);refresh()}catch(e){toast(e.message,1)}
+}
+async function testAll(){
+  try{const d=await api('/api/v1/nodes/test',{method:'POST',body:'{}'});toast('测速完成，成功 '+d.count+' 个');loadNodes();refresh()}catch(e){toast(e.message,1)}
+}
+async function rotateNow(){
+  try{const d=await api('/api/v1/rotate',{method:'POST',body:'{}'});toast(d.ok?('已轮换 → '+d.node):d.error,!d.ok);refresh()}catch(e){toast(e.message,1)}
+}
+async function doReload(){
+  try{const d=await api('/api/v1/reload',{method:'POST',body:'{}'});toast(`重载成功：${d.nodes} 节点 / ${d.node_ports} 端口`);refresh()}catch(e){toast('重载失败: '+e.message,1)}
+}
+async function impUrl(){try{const d=await api('/api/v1/config/import_url',{method:'POST',body:JSON.stringify({url:$('#imp-url').value.trim()})});toast('导入成功：'+d.reload.nodes+' 节点');loadHistory();refresh()}catch(e){toast(e.message,1)}}
+async function impFile(){
+  const f=$('#imp-file').files[0];if(!f)return toast('先选文件',1);
+  const buf=await f.arrayBuffer();
+  try{const d=await api('/api/v1/config/upload?name='+encodeURIComponent(f.name),{method:'POST',body:buf,headers:{'Content-Type':'application/octet-stream'}});toast('导入成功：'+d.reload.nodes+' 节点');loadHistory();refresh()}catch(e){toast(e.message,1)}
+}
+async function impPaste(){try{const d=await api('/api/v1/config/paste',{method:'POST',body:JSON.stringify({content:$('#imp-paste').value,name:$('#imp-paste-name').value.trim()||'paste.yaml'})});toast('导入成功：'+d.reload.nodes+' 节点');loadHistory();refresh()}catch(e){toast(e.message,1)}}
+async function impPath(){try{const d=await api('/api/v1/config/import_path',{method:'POST',body:JSON.stringify({path:$('#imp-path').value.trim()})});toast('导入成功：'+d.reload.nodes+' 节点');loadHistory();refresh()}catch(e){toast(e.message,1)}}
+async function loadHistory(){
+  try{const d=await api('/api/v1/config');
+    $('#hist-body').innerHTML=d.history.length?d.history.map(h=>`<tr><td>${esc(h.file)}</td><td>${h.size}B</td><td><button class="btn mini gray" onclick="restore('${esc(h.file)}')">恢复</button></td></tr>`).join(''):'<tr><td colspan="3" class="muted">还没有历史</td></tr>';
+  }catch(e){}
+}
+async function restore(f){try{const d=await api('/api/v1/history/restore',{method:'POST',body:JSON.stringify({file:f})});toast('已恢复：'+d.reload.nodes+' 节点');refresh()}catch(e){toast(e.message,1)}}
+async function saveSettings(){
+  try{    await api('/api/v1/settings',{method:'POST',body:JSON.stringify({node_name:$('#s-nname').value,max_ms:+$('#s-max').value,interval_s:+$('#s-int').value,keywords:$('#s-kw').value,ttl_s:+$('#s-ttl').value,test_url:$('#s-url').value.trim()})});toast('已保存');refresh()}catch(e){toast(e.message,1)}
+}
+async function loadLocal(){
+  try{
+    const d=await api('/api/v1/local');const L=d.local;
+    $('#snip-clash').textContent=L.snippets.clash;
+    $('#sub-url').value=L.subscription_url;
+    $('#vmess-cf').value=L.vmess_urls.cf||'（CF 域名未学习到，先用面板访问一次即可自动学习）';
+    $('#vmess-direct').value=L.vmess_urls.direct;
+    $('#node-name').value=L.node_name||'';
+    $('#local-ports').textContent=`IP: ${L.public_ip||'<未知>'} · CF端口: ${L.cfws_port} · 直连端口: ${L.vless_port} · mixed: ${L.mixed_port}`;
+    $('#local-note').textContent=L.note;
+  }catch(e){}
+}
+async function saveNodeName(){
+  try{
+    await api('/api/v1/settings',{method:'POST',body:JSON.stringify({node_name:$('#node-name').value})});
+    $('#nn-msg').textContent='已保存，重新下载/更新订阅生效';
+    loadLocal();
+  }catch(e){toast(e.message,1)}
+}
+function updMerge(){
+  const u=$('#merge-url').value.trim();
+  const link='/local-merged.yaml?url='+encodeURIComponent(u);
+  $('#merge-dl').href=link;
+  $('#merge-sub').value=u?location.origin+link:'（先填机场订阅 URL）';
+}
+function copyText(t){navigator.clipboard.writeText(t).then(()=>toast('已复制')).catch(()=>toast('复制失败',1))}
+function buildApi(){
+  const b=location.origin,t=token()||'<token>';
+  $('#api-snippets').textContent=
+`# 取一个门限内随机出口（每次调用都可能不同）
+curl "${b}/api/v1/pick?keywords=香港,家庭&max_ms=500" -H "X-Token: ${t}"
+# -> {"ok":true,"node":"🇭🇰 HK-01","port":17903,"proxy_url":"http://${location.hostname}:17903"}
+
+# 按 key 粘性分配（同一账号永远同一个出口，走 7892）
+curl "${b}/api/v1/pick?key=account-42&keywords=香港" -H "X-Token: ${t}"
+
+# 面向 Hub/CPA：账号绑定式出口（7892 或逐节点端口 17901+）
+#   Hub 自动发现 127.0.0.1:17901-17910 即可看到逐节点端口
+
+# 全部节点 + 延迟
+curl "${b}/api/v1/nodes" -H "X-Token: ${t}"
+# 立即测速
+curl -X POST "${b}/api/v1/nodes/test" -H "X-Token: ${t}" -d '{}'
+# 设置固定出口 / 立即轮换
+curl -X POST "${b}/api/v1/fixed" -H "X-Token: ${t}" -d '{"node":"🇭🇰 HK-01"}'
+curl -X POST "${b}/api/v1/rotate" -H "X-Token: ${t}" -d '{}'
+# 修改设置
+curl -X POST "${b}/api/v1/settings" -H "X-Token: ${t}" -d '{"max_ms":500,"interval_s":300,"keywords":"香港,家庭"}'`;
+}
+refresh().then(()=>{loadNodes()}).catch(()=>{});
+loadHistory();
+</script>
+</body>
+</html>
