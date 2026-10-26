@@ -93,7 +93,7 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
     </div>
     <div id="nodes-count" class="muted" style="font-size:12px;margin:4px 0"></div>
     <div style="max-height:62vh;overflow:auto">
-    <table><thead><tr id="nodes-head"><th data-k="name" onclick="setSort('name')">节点</th><th data-k="type" onclick="setSort('type')">类型</th><th data-k="delay_ms" onclick="setSort('delay_ms')">延迟</th><th data-k="listener_port" onclick="setSort('listener_port')">端口</th><th data-k="match" onclick="setSort('match')">门限</th><th></th></tr></thead>
+    <table><thead><tr id="nodes-head"><th data-k="name" onclick="setSort('name')">节点</th><th data-k="type" onclick="setSort('type')">类型</th><th data-k="delay_ms" onclick="setSort('delay_ms')">延迟</th><th data-k="qscore" onclick="setSort('qscore')">纯度</th><th data-k="listener_port" onclick="setSort('listener_port')">端口</th><th data-k="match" onclick="setSort('match')">门限</th><th></th></tr></thead>
     <tbody id="nodes-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody></table>
     </div>
   </div>
@@ -126,6 +126,7 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
         <label class="f">默认关键词 keywords（逗号分隔，命中任一即可，如：家庭,香港）<input id="s-kw" placeholder="家庭,香港"></label>
         <label class="f">缓存有效期 ttl_s（测速结果缓存秒数）<input type="number" id="s-ttl" min="5" max="600"></label>
         <label class="f">自动测速间隔 auto_test_s（服务器后台定时测全部节点，0=关闭）<input type="number" id="s-auto" min="0" max="86400"></label>
+        <label class="f">IP 质量检测（对有端口的节点查 ip-api 免费源，纯度高的优先分配端口）<select id="s-ipq"><option value="1">开启</option><option value="0">关闭</option></select></label>
         <label class="f">测速 URL<input id="s-url"></label>
       </div>
       <div class="row"><button class="btn" onclick="saveSettings()">保存设置</button><span id="set-msg" class="muted"></span></div>
@@ -139,6 +140,7 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
         自动测速：服务器后台每 auto_test_s 秒自动测全部节点并更新缓存，7891 轮换 / 7892 分配 / API 挑选都会自动避开超时节点。<br>
         后台独立性：轮换与自动测速都在服务器进程里跑，关闭网页完全不影响；API Token 只用于打开本面板，保存在浏览器本地，输入一次即可。<br>
         节点「超时」是服务器视角：部分机场入口（CDN 类）会拒绝机房 IP 的 TLS 握手（家里住宅 IP 正常），这类节点从服务器永远不通，属来源 IP 选择性，非配置问题。<br>
+        纯度分：每轮测速后对有端口的节点探测出口 IP 并查 ip-api（免费源），机房 -35、代理 -25、移动 +5；分配端口时按「纯度高优先、同纯度延迟低优先」排序。
         端口可在 .env 用 MPOOL_HUB_PORTS=7890,7891,7892 自定义（改后重启服务生效）。
       </div>
     </div>
@@ -224,17 +226,22 @@ async function refresh(){
     if(s.source){$('#src-box').style.display='block';$('#src-info').textContent=`${s.source.name} · ${s.source.size}B · sha:${s.source.sha256} · 导入于 ${s.source.imported_at}`;}
     $('#src-err').textContent=s.last_error||'';
     const st=await api('/api/v1/settings');const x=st.settings;
-    $('#s-nname').value=x.node_name||'';$('#s-max').value=x.max_ms;$('#s-int').value=x.interval_s;$('#s-kw').value=x.keywords;$('#s-ttl').value=x.ttl_s;$('#s-url').value=x.test_url;$('#s-auto').value=x.auto_test_s;
+    $('#s-nname').value=x.node_name||'';$('#s-max').value=x.max_ms;$('#s-int').value=x.interval_s;$('#s-kw').value=x.keywords;$('#s-ttl').value=x.ttl_s;$('#s-url').value=x.test_url;$('#s-auto').value=x.auto_test_s;$('#s-ipq').value=String(x.ipq_enabled??1);
     buildApi();
   }catch(e){toast('加载失败: '+e.message,1)}
 }
 let NSORT={k:'',dir:1};
+function qcell(q){
+  if(!q)return '<span class="muted">—</span>';
+  const c=q.score>=80?'d-ok':(q.score>=50?'warn':'d-bad');
+  return `<span class="${c}" title="${esc(q.kind+' · '+(q.isp||'')+' · '+(q.country||'')+' '+(q.city||''))}">${q.score}</span> <span class="muted" style="font-size:11px">${esc(q.kind)}</span>`;
+}
 function setSort(k){
   if(NSORT.k===k)NSORT.dir=-NSORT.dir;else{NSORT.k=k;NSORT.dir=1}
   renderNodesHead();loadNodes().catch(()=>{});
 }
 function renderNodesHead(){
-  const map={name:'节点',type:'类型',delay_ms:'延迟',listener_port:'端口',match:'门限'};
+  const map={name:'节点',type:'类型',delay_ms:'延迟',qscore:'纯度',listener_port:'端口',match:'门限'};
   document.querySelectorAll('#nodes-head th').forEach(th=>{
     const k=th.dataset.k;if(!k)return;
     let t=map[k]||'';
@@ -253,6 +260,7 @@ async function loadNodes(){
     rows=[...rows].sort((a,b)=>{
       const x=a[NSORT.k],y=b[NSORT.k];
       if(NSORT.k==='name'||NSORT.k==='type')return NSORT.dir*String(x||'').localeCompare(String(y||''));
+      if(NSORT.k==='qscore'){const a=(n.quality?n.quality.score:-1),b2=(b.quality?b.quality.score:-1);return NSORT.dir*(b2-a)}
       if(NSORT.k==='match')return NSORT.dir*((x?1:0)-(y?1:0));
       if(x==null)return 1;
       if(y==null)return -1;
@@ -265,7 +273,7 @@ async function loadNodes(){
     let dcls,dtxt;
     if(n.delay_ms==null){if(n.tested){dcls='d-bad';dtxt='超时'}else{dcls='muted';dtxt='未测'}}
     else{dcls=n.delay_ms<=max?'d-ok':'d-bad';dtxt=n.delay_ms+'ms'}
-    return `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${n.listener_port??'—'}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td><button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button></td></tr>`;
+    return `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${qcell(n.quality)}</td><td>${n.listener_port??'—'}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td><button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button></td></tr>`;
   }).join(''):'<tr><td colspan="6" class="muted">'+(d.nodes.length?'没有匹配的节点':'没有节点')+'</td></tr>';
 }
 async function setFixed(btn){
@@ -295,7 +303,7 @@ async function loadHistory(){
 }
 async function restore(f){try{const d=await api('/api/v1/history/restore',{method:'POST',body:JSON.stringify({file:f})});toast('已恢复：'+d.reload.nodes+' 节点');refresh()}catch(e){toast(e.message,1)}}
 async function saveSettings(){
-  try{    await api('/api/v1/settings',{method:'POST',body:JSON.stringify({node_name:$('#s-nname').value,max_ms:+$('#s-max').value,interval_s:+$('#s-int').value,keywords:$('#s-kw').value,ttl_s:+$('#s-ttl').value,test_url:$('#s-url').value.trim(),auto_test_s:+$('#s-auto').value})});toast('已保存');refresh()}catch(e){toast(e.message,1)}
+  try{    await api('/api/v1/settings',{method:'POST',body:JSON.stringify({node_name:$('#s-nname').value,max_ms:+$('#s-max').value,interval_s:+$('#s-int').value,keywords:$('#s-kw').value,ttl_s:+$('#s-ttl').value,test_url:$('#s-url').value.trim(),auto_test_s:+$('#s-auto').value,ipq_enabled:+$('#s-ipq').value})});toast('已保存');refresh()}catch(e){toast(e.message,1)}
 }
 async function loadLocal(){
   try{

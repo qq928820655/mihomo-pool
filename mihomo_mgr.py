@@ -38,7 +38,25 @@ DEFAULT_SETTINGS = {
     "fixed_node": "",
     "node_name": "",
     "auto_test_s": 300,
+    "ipq_enabled": 1,
 }
+
+
+def ipq_score(info):
+    score = 100
+    if info.get("hosting"):
+        score -= 35
+    if info.get("proxy"):
+        score -= 25
+    if info.get("mobile"):
+        score = min(100, score + 5)
+    if info.get("proxy"):
+        kind = "代理"
+    elif info.get("hosting"):
+        kind = "机房"
+    else:
+        kind = "住宅"
+    return max(0, min(100, int(score))), kind
 
 
 class PoolError(Exception):
@@ -211,6 +229,9 @@ class Pool:
         self.node_types = {}
         self.port_map = {}
         self.last_delays = self._load_last_delays()
+        self.node_quality = {}
+        self._ipq_path = os.path.join(self.runtime_dir, "ipq.json")
+        self._load_ipq()
         self.proc = None
         self.runtime_ok = False
         self.last_error = ""
@@ -247,10 +268,111 @@ class Pool:
             return names
         alive = {n: v for n, v in self.last_delays.items() if isinstance(v, int)}
         dead = {n for n, v in self.last_delays.items() if v == "x"}
-        order = sorted(alive, key=alive.get)
+        order = sorted(alive, key=self._qkey)
         order += [n for n in names if n not in alive and n not in dead]
         order += sorted(n for n in names if n in dead)
         return order
+
+    def _load_ipq(self):
+        try:
+            with open(self._ipq_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                self.node_quality = data.get("nodes") if isinstance(data.get("nodes"), dict) else {}
+        except (OSError, ValueError):
+            self.node_quality = {}
+
+    def _save_ipq(self):
+        try:
+            with open(self._ipq_path, "w", encoding="utf-8") as fh:
+                json.dump({"nodes": self.node_quality}, fh, ensure_ascii=False)
+        except OSError:
+            pass
+
+    def _qscore(self, name):
+        q = self.node_quality.get(name)
+        if not q:
+            return 60
+        if time.time() - float(q.get("ts") or 0) > 172800:
+            return 60
+        return int(q.get("score") or 60)
+
+    def _exit_ip_via_port(self, port):
+        try:
+            req = urllib.request.Request("http://api.ipify.org", method="GET")
+            proxy = urllib.request.ProxyHandler({"http": "http://127.0.0.1:%d" % int(port), "https": "http://127.0.0.1:%d" % int(port)})
+            opener = urllib.request.build_opener(proxy)
+            opener.addheaders = [("User-Agent", "mihomo-pool")]
+            with opener.open(req, timeout=8) as resp:
+                ip = resp.read().decode("utf-8", "replace").strip()
+                if ip and sum(c.isdigit() or c == "." or c == ":" for c in ip) == len(ip):
+                    return ip
+                return None
+        except Exception:
+            return None
+
+    def _ipq_query(self, ips):
+        if not ips:
+            return {}
+        fields = "query,proxy,hosting,mobile,isp,as,country,city"
+        req = urllib.request.Request(
+            "http://ip-api.com/batch?fields=%s" % fields,
+            data=json.dumps(ips).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            rows = json.loads(resp.read().decode("utf-8", "replace"))
+        out = {}
+        for row in rows if isinstance(rows, list) else []:
+            ip = str(row.get("query") or "")
+            if ip:
+                out[ip] = row
+        return out
+
+    def check_ip_quality(self):
+        with self._lock:
+            if not int(self.settings.get("ipq_enabled") or 0):
+                return {"checked": 0, "skipped": "ipq_enabled=0"}
+            ports = dict(self.port_map)
+            if not ports:
+                return {"checked": 0}
+            node_ip = {}
+            for node, port in ports.items():
+                ip = self._exit_ip_via_port(port)
+                if ip:
+                    node_ip[node] = ip
+            uniq = sorted(set(node_ip.values()))
+            infos = self._ipq_query(uniq)
+            now = time.time()
+            fresh = {}
+            for node, ip in node_ip.items():
+                info = infos.get(ip)
+                if not info:
+                    continue
+                score, kind = ipq_score(info)
+                fresh[node] = {
+                    "ip": ip,
+                    "score": score,
+                    "kind": kind,
+                    "isp": str(info.get("isp") or "")[:60],
+                    "as": str(info.get("as") or "")[:40],
+                    "country": str(info.get("country") or ""),
+                    "city": str(info.get("city") or "")[:40],
+                    "proxy": bool(info.get("proxy")),
+                    "hosting": bool(info.get("hosting")),
+                    "mobile": bool(info.get("mobile")),
+                    "ts": now,
+                }
+            if fresh:
+                self.node_quality = fresh
+                self._save_ipq()
+            good = sum(1 for q in fresh.values() if q["score"] >= 80)
+            self.log("ipq: checked %d/%d ports, >=80: %d, avg %d" % (len(fresh), len(ports), good, (sum(q["score"] for q in fresh.values()) // len(fresh)) if fresh else 0))
+            return {"checked": len(fresh), "ports": len(ports)}
+
+    def _qkey(self, name):
+        return (-self._qscore(name), self.last_delays.get(name) if isinstance(self.last_delays.get(name), int) else 9999)
 
     def _load_secret(self):
         if os.path.exists(self.secret_path):
@@ -556,6 +678,8 @@ class Pool:
                 if not 0 <= val <= 86400:
                     raise PoolError("auto_test_s 需在 0-86400 之间（0=关闭）")
                 clean["auto_test_s"] = val
+            if "ipq_enabled" in patch:
+                clean["ipq_enabled"] = 1 if patch["ipq_enabled"] in (1, True, "1", "true", "on") else 0
             if "keywords" in patch:
                 clean["keywords"] = str(patch["keywords"] or "").strip()
             if "test_url" in patch:
@@ -805,13 +929,18 @@ class Pool:
             }
             reachable = {n: v for n, v in res.items() if n in self.node_list and isinstance(v, int)}
             self._reselect_alive_defaults(alive)
+            if int(self.settings.get("ipq_enabled") or 0):
+                try:
+                    self.check_ip_quality()
+                except Exception as exc:
+                    self.log("ipq error: %s" % exc)
             self._remap_ports_to_alive(reachable)
             return {n: res[n] for n in self.node_list if n in res}
 
     def _reselect_alive_defaults(self, alive):
         if not alive:
             return
-        best = min(alive, key=alive.get)
+        best = min(alive, key=self._qkey)
         try:
             fixed_now = self.ctrl.selected(GROUP_FIXED)
         except ControllerError:
@@ -851,7 +980,7 @@ class Pool:
         pool = sorted(pool)[:want]
         new_map = {n: p for n, p in old_map.items() if n in alive and p in pool}
         free = [p for p in pool if p not in set(new_map.values())]
-        for n in sorted(alive, key=alive.get):
+        for n in sorted(alive, key=self._qkey):
             if not free:
                 break
             if n in new_map:
@@ -1010,6 +1139,7 @@ class Pool:
                     "delay_ms": fresh.get(name),
                     "tested": name in fresh,
                     "listener_port": self.port_map.get(name),
+                    "quality": self.node_quality.get(name),
                     "match": keywords_match(name, keywords if keywords else self.settings["keywords"]),
                 }
             )

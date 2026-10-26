@@ -67,6 +67,7 @@ class TestInject(unittest.TestCase):
         p.settings = dict(m.DEFAULT_SETTINGS)
         p.hub_ports = (7890, 7891, 7892)
         p.last_delays = {}
+        p.node_quality = {}
         p.local = {"uuid": "u-1", "path": "/ws-x", "mixed_port": 7893, "vless_port": 17990, "cfws_port": 8443, "cf_base": "example.live"}
         p.local_path = os.path.join(tempfile.gettempdir(), "mpool-test-local-%d.json" % os.getpid())
         p.log = lambda s: None
@@ -204,6 +205,36 @@ class TestInject(unittest.TestCase):
         p.ctrl.sel.update({"HUB-FIXED": "b", "HUB-ROTATE": "a", "HUB-ASSIGN": "b"})
         p._reselect_alive_defaults(alive)
         self.assertEqual(p.ctrl.calls, [])
+
+    def test_ipq_score(self):
+        self.assertEqual(m.ipq_score({}), (100, "住宅"))
+        self.assertEqual(m.ipq_score({"mobile": True}), (100, "住宅"))
+        s, kind = m.ipq_score({"hosting": True})
+        self.assertEqual((s, kind), (65, "机房"))
+        s, kind = m.ipq_score({"hosting": True, "proxy": True})
+        self.assertEqual((s, kind), (40, "代理"))
+        self.assertEqual(m.ipq_score({"proxy": True, "mobile": True}), (80, "代理"))
+
+    def test_port_order_quality_first(self):
+        p = TestInject._fake_pool(self)
+        p.last_delays = {"dirty-fast": 50, "clean-slow": 300}
+        import time as _t
+        p.node_quality = {
+            "clean-slow": {"score": 95, "ts": _t.time()},
+            "dirty-fast": {"score": 40, "ts": _t.time()},
+        }
+        self.assertEqual(p._port_order(["dirty-fast", "clean-slow"])[0], "clean-slow")
+        self.assertEqual(p._qkey("dirty-fast"), (-40, 50))
+        stale = {"score": 95, "ts": _t.time() - 200000}
+        p.node_quality["clean-slow"] = stale
+        self.assertEqual(p._qscore("clean-slow"), 60)
+
+    def test_update_ipq_enabled(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = TestSettings._pool(self, d)
+            self.assertEqual(p.update_settings({"ipq_enabled": 0})["ipq_enabled"], 0)
+            self.assertEqual(p.update_settings({"ipq_enabled": True})["ipq_enabled"], 1)
+            self.assertEqual(p.update_settings({"ipq_enabled": "0"})["ipq_enabled"], 0)
 
     def test_local_node_yaml(self):
         import yaml as _yaml
