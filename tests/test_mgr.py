@@ -111,6 +111,29 @@ class TestInject(unittest.TestCase):
         self.assertEqual((out["hub-fixed"]["server_port"], out["hub-rotate"]["server_port"], out["hub-assign"]["server_port"]), (7890, 7891, 7892))
         self.assertEqual(cfg["route"]["rules"][0], {"inbound": "cfws-fixed", "outbound": "hub-fixed"})
 
+    def test_reselect_alive_defaults(self):
+        class C:
+            def __init__(self):
+                self.sel = {"HUB-FIXED": "dead-1", "HUB-ROTATE": "dead-2", "HUB-ASSIGN": "dead-3"}
+                self.calls = []
+            def selected(self, g):
+                return self.sel[g]
+            def select(self, g, n):
+                self.calls.append((g, n))
+                self.sel[g] = n
+        p = TestInject._fake_pool(self)
+        p.ctrl = C()
+        p.log = lambda s: None
+        alive = {"a": 100, "b": 200}
+        p._reselect_alive_defaults(alive)
+        self.assertEqual(p.ctrl.sel["HUB-FIXED"], "a")
+        self.assertIn(p.ctrl.sel["HUB-ROTATE"], alive)
+        self.assertEqual(p.ctrl.sel["HUB-ASSIGN"], sorted(alive)[m.stable_index("default", 2)])
+        p.ctrl.calls.clear()
+        p.ctrl.sel.update({"HUB-FIXED": "b", "HUB-ROTATE": "a", "HUB-ASSIGN": "b"})
+        p._reselect_alive_defaults(alive)
+        self.assertEqual(p.ctrl.calls, [])
+
     def test_local_node_yaml(self):
         import yaml as _yaml
         p = self._fake_pool()

@@ -134,7 +134,7 @@ class Controller:
             urllib.parse.quote(group, safe=""),
             urllib.parse.urlencode({"url": url, "timeout": int(timeout_ms)}),
         )
-        data = self._req("GET", path, timeout=max(5.0, timeout_ms / 1000.0 + 5.0))
+        data = self._req("GET", path, timeout=45.0)
         return data if isinstance(data, dict) else {}
 
     def proxy_delay(self, name, url, timeout_ms):
@@ -763,7 +763,40 @@ class Pool:
                 timeout_ms = min(3000, max(1000, int(self.settings["max_ms"]) * 3))
             res = self.ctrl.group_delay(GROUP_ROTATE, url, timeout_ms)
             self.cache.bulk_put({n: res.get(n) for n in self.node_list})
+            alive = {
+                n: v
+                for n, v in res.items()
+                if n in self.node_list and isinstance(v, int) and v <= int(self.settings["max_ms"])
+            }
+            self._reselect_alive_defaults(alive)
             return {n: res[n] for n in self.node_list if n in res}
+
+    def _reselect_alive_defaults(self, alive):
+        if not alive:
+            return
+        best = min(alive, key=alive.get)
+        try:
+            fixed_now = self.ctrl.selected(GROUP_FIXED)
+        except ControllerError:
+            fixed_now = None
+        if fixed_now not in alive and fixed_now != best:
+            self.ctrl.select(GROUP_FIXED, best)
+            self.log("fixed exit auto-fallback -> %s (previous %r unreachable)" % (best, fixed_now))
+        try:
+            rotate_now = self.ctrl.selected(GROUP_ROTATE)
+        except ControllerError:
+            rotate_now = None
+        if rotate_now not in alive:
+            self.ctrl.select(GROUP_ROTATE, random.choice(sorted(alive)))
+            self.log("rotate exit auto-fallback -> alive node (previous %r unreachable)" % (rotate_now,))
+        try:
+            assign_now = self.ctrl.selected(GROUP_ASSIGN)
+        except ControllerError:
+            assign_now = None
+        if assign_now not in alive:
+            pick_node = sorted(alive)[stable_index("default", len(alive))]
+            self.ctrl.select(GROUP_ASSIGN, pick_node)
+            self.log("assign exit auto-fallback -> %s (previous %r unreachable)" % (pick_node, assign_now))
 
     def gate(self, keywords=None, max_ms=None, refresh=False):
         kw = self.settings["keywords"] if keywords is None else keywords
@@ -845,6 +878,7 @@ class Pool:
                 )
             except Exception as exc:
                 self.last_auto_test = {"ts": time.time(), "error": str(exc)}
+                self._next_auto = time.time() + 30
                 self.log("auto-test error: %s" % exc)
 
     def stop_autotest(self):

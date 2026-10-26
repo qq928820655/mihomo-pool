@@ -88,11 +88,12 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
     <div class="row">
       <input id="kw" placeholder="关键词过滤（逗号分隔，命中任一即显示）" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')loadNodes()">
       <button class="btn gray" onclick="loadNodes()">过滤</button>
+      <label style="font-size:13px;color:var(--dim);white-space:nowrap"><input type="checkbox" id="only-ok" onchange="loadNodes()"> 只看可用</label>
       <button class="btn" onclick="testAll()">测速全部</button>
     </div>
     <div id="nodes-count" class="muted" style="font-size:12px;margin:4px 0"></div>
     <div style="max-height:62vh;overflow:auto">
-    <table><thead><tr><th>节点</th><th>类型</th><th>延迟</th><th>端口</th><th>门限</th><th></th></tr></thead>
+    <table><thead><tr id="nodes-head"><th data-k="name" onclick="setSort('name')">节点</th><th data-k="type" onclick="setSort('type')">类型</th><th data-k="delay_ms" onclick="setSort('delay_ms')">延迟</th><th data-k="listener_port" onclick="setSort('listener_port')">端口</th><th data-k="match" onclick="setSort('match')">门限</th><th></th></tr></thead>
     <tbody id="nodes-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody></table>
     </div>
   </div>
@@ -227,12 +228,38 @@ async function refresh(){
     buildApi();
   }catch(e){toast('加载失败: '+e.message,1)}
 }
+let NSORT={k:'',dir:1};
+function setSort(k){
+  if(NSORT.k===k)NSORT.dir=-NSORT.dir;else{NSORT.k=k;NSORT.dir=1}
+  renderNodesHead();loadNodes().catch(()=>{});
+}
+function renderNodesHead(){
+  const map={name:'节点',type:'类型',delay_ms:'延迟',listener_port:'端口',match:'门限'};
+  document.querySelectorAll('#nodes-head th').forEach(th=>{
+    const k=th.dataset.k;if(!k)return;
+    let t=map[k]||'';
+    if(k===NSORT.k)t+=NSORT.dir===1?' ▲':' ▼';
+    th.textContent=t;
+  });
+}
 async function loadNodes(){
   const kw=$('#kw').value.trim();
   const d=await api('/api/v1/nodes'+(kw?'?keywords='+encodeURIComponent(kw):''));
   const max=STATUS.settings?STATUS.settings.max_ms:500;
   const kws=kw.toLowerCase().split(/[,，]/).map(s=>s.trim()).filter(Boolean);
-  const rows=d.nodes.filter(n=>!kws.length||kws.some(k=>n.name.toLowerCase().includes(k)));
+  let rows=d.nodes.filter(n=>!kws.length||kws.some(k=>n.name.toLowerCase().includes(k)));
+  if($('#only-ok')&&$('#only-ok').checked)rows=rows.filter(n=>typeof n.delay_ms==='number'&&n.delay_ms<=max);
+  if(NSORT.k){
+    rows=[...rows].sort((a,b)=>{
+      const x=a[NSORT.k],y=b[NSORT.k];
+      if(NSORT.k==='name'||NSORT.k==='type')return NSORT.dir*String(x||'').localeCompare(String(y||''));
+      if(NSORT.k==='match')return NSORT.dir*((x?1:0)-(y?1:0));
+      if(x==null)return 1;
+      if(y==null)return -1;
+      return NSORT.dir*(x-y);
+    });
+  }
+  renderNodesHead();
   $('#nodes-count').textContent=rows.length===d.nodes.length?('共 '+d.nodes.length+' 个节点'):('过滤后 '+rows.length+' / '+d.nodes.length+' 个节点');
   $('#nodes-body').innerHTML=rows.length?rows.map(n=>{
     let dcls,dtxt;
