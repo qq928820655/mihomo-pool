@@ -29,9 +29,27 @@ EOF
 fi
 ./bin/mihomo -v | head -1
 
+echo "[2.5/3] sing-box binary (本地节点 CF-WS 入站用)"
+if [ ! -x bin/sing-box ]; then
+  mkdir -p bin
+  URL=$(.venv/bin/python - <<'EOF'
+import json, urllib.request
+d = json.load(urllib.request.urlopen("https://api.github.com/repos/SagerNet/sing-box/releases/latest", timeout=30))
+print([a["browser_download_url"] for a in d["assets"]
+       if a["name"].startswith("sing-box-") and "linux-amd64" in a["name"] and a["name"].endswith(".tar.gz")
+       and "legacy" not in a["name"]][0])
+EOF
+)
+  curl -sL -m 300 -o bin/sing-box.tar.gz "$URL"
+  tar xzf bin/sing-box.tar.gz -C bin/
+  mv -f bin/sing-box-*/sing-box bin/sing-box
+  rm -rf bin/sing-box-*/ bin/sing-box.tar.gz
+fi
+./bin/sing-box version | head -1
+
 echo "[3/3] start"
 if [ ! -f .env ]; then
-  printf 'MPOOL_PORT=8006\nMPOOL_TOKEN=changeme\nMPOOL_CONTROLLER=127.0.0.1:9090\nMPOOL_LISTEN_BASE=17901\nMPOOL_LISTEN_MAX=32\n' > .env
+  printf 'MPOOL_PORT=8006\nMPOOL_TOKEN=changeme\nMPOOL_CONTROLLER=127.0.0.1:9090\nMPOOL_LISTEN_BASE=17901\nMPOOL_LISTEN_MAX=32\nMPOOL_LOCAL_PORT=7893\nMPOOL_LOCAL_VLESS_PORT=17990\nMPOOL_CFWS_PORT=8443\n' > .env
   echo "已生成默认 .env，请修改 MPOOL_TOKEN！"
 fi
 ./start.sh
