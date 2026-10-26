@@ -171,6 +171,10 @@ class DelayCache:
         with self._lock:
             return {name: ms for name, (ts, ms) in self._d.items() if ts >= cutoff}
 
+    def all(self):
+        with self._lock:
+            return {name: ms for name, (ts, ms) in self._d.items()}
+
     def clear(self):
         with self._lock:
             self._d.clear()
@@ -737,6 +741,8 @@ class Pool:
         if refresh and not fresh:
             self.refresh_delays()
             fresh = self.cache.fresh(self.settings["ttl_s"])
+        if not fresh:
+            fresh = self.cache.all()
         return [
             n
             for n in self.node_list
@@ -852,7 +858,7 @@ class Pool:
         return {"node": node, "port": port, "sticky": False}
 
     def nodes_view(self, keywords=""):
-        fresh = self.cache.fresh(self.settings["ttl_s"])
+        fresh = self.cache.fresh(self.settings["ttl_s"]) or self.cache.all()
         out = []
         for name in self.node_list:
             out.append(

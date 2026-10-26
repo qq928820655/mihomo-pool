@@ -37,6 +37,7 @@ class TestDelayCache(unittest.TestCase):
         with c._lock:
             c._d["a"] = (time.time() - 60, 100)
         self.assertEqual(c.fresh(30), {})
+        self.assertEqual(c.all(), {"a": 100})
 
     def test_bulk_put_marks_failures(self):
         c = m.DelayCache()
@@ -309,6 +310,21 @@ class TestSettings(unittest.TestCase):
         self.assertTrue(view["b"]["tested"])
         self.assertIsNone(view["c"]["delay_ms"])
         self.assertFalse(view["c"]["tested"])
+
+    def test_nodes_view_stale_fallback(self):
+        import time as _t
+        p = TestInject._fake_pool(self)
+        p.node_list = ["a", "b"]
+        p.node_types = {}
+        p.port_map = {}
+        p.cache = m.DelayCache()
+        p.cache.put("a", 200)
+        with p.cache._lock:
+            p.cache._d["a"] = (_t.time() - 999, 200)
+        p.settings["ttl_s"] = 30
+        view = {n["name"]: n for n in p.nodes_view()}
+        self.assertEqual(view["a"]["delay_ms"], 200)
+        self.assertTrue(view["a"]["tested"])
 
     def test_persist_roundtrip(self):
         import json
