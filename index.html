@@ -86,10 +86,11 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
   </div>
   <div class="page" id="p-nodes">
     <div class="row">
-      <input id="kw" placeholder="关键词过滤（逗号分隔，空=用设置里的）" style="flex:1;min-width:200px">
+      <input id="kw" placeholder="关键词过滤（逗号分隔，命中任一即显示）" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter')loadNodes()">
       <button class="btn gray" onclick="loadNodes()">过滤</button>
       <button class="btn" onclick="testAll()">测速全部</button>
     </div>
+    <div id="nodes-count" class="muted" style="font-size:12px;margin:4px 0"></div>
     <div style="max-height:62vh;overflow:auto">
     <table><thead><tr><th>节点</th><th>类型</th><th>延迟</th><th>端口</th><th>门限</th><th></th></tr></thead>
     <tbody id="nodes-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody></table>
@@ -136,6 +137,7 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
         17901+ 逐节点端口：每个节点一个独享端口，供 CPA/Hub 按端口绑定账号（自动发现前 10 个）。<br>
         自动测速：服务器后台每 auto_test_s 秒自动测全部节点并更新缓存，7891 轮换 / 7892 分配 / API 挑选都会自动避开超时节点。<br>
         后台独立性：轮换与自动测速都在服务器进程里跑，关闭网页完全不影响；API Token 只用于打开本面板，保存在浏览器本地，输入一次即可。<br>
+        节点「超时」是服务器视角：部分机场入口（CDN 类）会拒绝机房 IP 的 TLS 握手（家里住宅 IP 正常），这类节点从服务器永远不通，属来源 IP 选择性，非配置问题。<br>
         端口可在 .env 用 MPOOL_HUB_PORTS=7890,7891,7892 自定义（改后重启服务生效）。
       </div>
     </div>
@@ -229,12 +231,15 @@ async function loadNodes(){
   const kw=$('#kw').value.trim();
   const d=await api('/api/v1/nodes'+(kw?'?keywords='+encodeURIComponent(kw):''));
   const max=STATUS.settings?STATUS.settings.max_ms:500;
-  $('#nodes-body').innerHTML=d.nodes.length?d.nodes.map(n=>{
+  const kws=kw.toLowerCase().split(/[,，]/).map(s=>s.trim()).filter(Boolean);
+  const rows=d.nodes.filter(n=>!kws.length||kws.some(k=>n.name.toLowerCase().includes(k)));
+  $('#nodes-count').textContent=rows.length===d.nodes.length?('共 '+d.nodes.length+' 个节点'):('过滤后 '+rows.length+' / '+d.nodes.length+' 个节点');
+  $('#nodes-body').innerHTML=rows.length?rows.map(n=>{
     let dcls,dtxt;
     if(n.delay_ms==null){if(n.tested){dcls='d-bad';dtxt='超时'}else{dcls='muted';dtxt='未测'}}
     else{dcls=n.delay_ms<=max?'d-ok':'d-bad';dtxt=n.delay_ms+'ms'}
     return `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${n.listener_port??'—'}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td><button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button></td></tr>`;
-  }).join(''):'<tr><td colspan="6" class="muted">没有节点</td></tr>';
+  }).join(''):'<tr><td colspan="6" class="muted">'+(d.nodes.length?'没有匹配的节点':'没有节点')+'</td></tr>';
 }
 async function setFixed(btn){
   try{const d=await api('/api/v1/fixed',{method:'POST',body:JSON.stringify({node:btn.dataset.n})});toast('固定出口 → '+d.node);refresh()}catch(e){toast(e.message,1)}
@@ -291,8 +296,10 @@ function updMerge(){
   $('#merge-sub').value=u?location.origin+link:'（先填机场订阅 URL）';
 }
 function copyText(t){navigator.clipboard.writeText(t).then(()=>toast('已复制')).catch(()=>toast('复制失败',1))}
-function buildApi(){
+async function buildApi(){
   const b=location.origin,t=token()||'<token>';
+  let ip=location.hostname;
+  try{const r=await fetch('/api/v1/local',{headers:{'X-Token':token()}});if(r.ok){const l=await r.json();if(l.local&&l.local.public_ip)ip=l.local.public_ip}}catch(e){}
   $('#api-snippets').textContent=
 `# 取一个门限内随机出口（每次调用都可能不同）
 curl "${b}/api/v1/pick?keywords=香港,家庭&max_ms=500" -H "X-Token: ${t}"
@@ -314,14 +321,14 @@ curl -X POST "${b}/api/v1/rotate" -H "X-Token: ${t}" -d '{}'
 # 修改设置
 curl -X POST "${b}/api/v1/settings" -H "X-Token: ${t}" -d '{"max_ms":500,"interval_s":300,"keywords":"香港,家庭","auto_test_s":300}'
 
-━━ 出口端口用法（IP 换成服务器地址；7890=固定 7891=轮换 7892=分配）━━
-# curl 走代理
-curl -x http://<IP>:7890 https://api.ipify.org        # 固定出口
-curl -x http://<IP>:7891 https://api.ipify.org        # 轮换出口（每 interval_s 秒自动换）
+━━ 出口端口用法（下面的 ${ip} 是本服务器真实地址；7890=固定 7891=轮换 7892=分配）━━
+# curl 走代理（注意：仅服务器本机/同机服务可用；公网原始端口被平台封锁，家里请用「本地节点」页的 CF 节点）
+curl -x http://${ip}:7890 https://api.ipify.org        # 固定出口
+curl -x http://${ip}:7891 https://api.ipify.org        # 轮换出口（每 interval_s 秒自动换）
 # python requests
-requests.get("https://api.ipify.org", proxies={"http":"http://<IP>:7890","https":"http://<IP>:7890"})
+requests.get("https://api.ipify.org", proxies={"http":"http://${ip}:7890","https":"http://${ip}:7890"})
 # 环境变量（git / pip / npm 等命令行工具通用）
-export http_proxy=http://<IP>:7890 https_proxy=http://<IP>:7890
+export http_proxy=http://${ip}:7890 https_proxy=http://${ip}:7890
 # 7892：先按账号取粘性端口（同 key 恒定），也可直接用 7892 本身
 curl "${b}/api/v1/pick?key=账号ID" -H "X-Token: ${t}"   # 返回该账号专属节点与端口`;
 }
