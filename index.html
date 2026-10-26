@@ -51,7 +51,7 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
 <header>
   <span><span class="dot" id="dot"></span><b>mihomo-pool</b> <span class="ver" id="ver"></span></span>
   <span style="flex:1"></span>
-  <input id="token" placeholder="API Token" style="width:180px" onchange="localStorage.setItem('mpool_token',this.value)">
+  <input id="token" type="password" placeholder="API Token" title="只需输入一次，自动保存在浏览器本地" style="width:180px" oninput="localStorage.setItem('mpool_token',this.value)">
 </header>
 <nav id="nav">
   <button data-p="home" class="act">概览</button>
@@ -66,10 +66,11 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
     <div class="cards">
       <div class="card"><div class="k">运行状态</div><div class="v" id="c-run">—</div></div>
       <div class="card"><div class="k">节点数 / 已映射端口</div><div class="v" id="c-nodes">—</div></div>
-      <div class="card"><div class="k">7890 固定出口</div><div class="v small" id="c-fixed">—</div></div>
-      <div class="card"><div class="k">7891 轮换出口</div><div class="v small" id="c-rotate">—</div></div>
-      <div class="card"><div class="k">7892 分配出口</div><div class="v small" id="c-assign">—</div></div>
+      <div class="card"><div class="k" id="t-fixed">固定出口</div><div class="v small" id="c-fixed">—</div></div>
+      <div class="card"><div class="k" id="t-rotate">轮换出口</div><div class="v small" id="c-rotate">—</div></div>
+      <div class="card"><div class="k" id="t-assign">分配出口</div><div class="v small" id="c-assign">—</div></div>
       <div class="card"><div class="k">门限内可用（缓存）</div><div class="v" id="c-fresh">—</div></div>
+      <div class="card"><div class="k">后台自动测速</div><div class="v small" id="c-auto">—</div></div>
     </div>
     <div class="row">
       <button class="btn" onclick="testAll()">测速全部</button>
@@ -122,6 +123,7 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
         <label class="f">轮换间隔 interval_s（7891 每隔多少秒随机换一个出口）<input type="number" id="s-int" min="5" max="86400"></label>
         <label class="f">默认关键词 keywords（逗号分隔，命中任一即可，如：家庭,香港）<input id="s-kw" placeholder="家庭,香港"></label>
         <label class="f">缓存有效期 ttl_s（测速结果缓存秒数）<input type="number" id="s-ttl" min="5" max="600"></label>
+        <label class="f">自动测速间隔 auto_test_s（服务器后台定时测全部节点，0=关闭）<input type="number" id="s-auto" min="0" max="86400"></label>
         <label class="f">测速 URL<input id="s-url"></label>
       </div>
       <div class="row"><button class="btn" onclick="saveSettings()">保存设置</button><span id="set-msg" class="muted"></span></div>
@@ -131,7 +133,10 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
         7890 固定出口：在「节点」页点「设为固定」，重载后自动恢复。<br>
         7891 动态轮换：每 interval_s 秒在「关键词命中 + 延迟 ≤ max_ms」的节点里随机换一个。<br>
         7892 分配出口：调用 API 传入 key（如账号 ID），同一 key 稳定映射到同一节点。<br>
-        17901+ 逐节点端口：每个节点一个独享端口，供 CPA/Hub 按端口绑定账号（自动发现前 10 个）。
+        17901+ 逐节点端口：每个节点一个独享端口，供 CPA/Hub 按端口绑定账号（自动发现前 10 个）。<br>
+        自动测速：服务器后台每 auto_test_s 秒自动测全部节点并更新缓存，7891 轮换 / 7892 分配 / API 挑选都会自动避开超时节点。<br>
+        后台独立性：轮换与自动测速都在服务器进程里跑，关闭网页完全不影响；API Token 只用于打开本面板，保存在浏览器本地，输入一次即可。<br>
+        端口可在 .env 用 MPOOL_HUB_PORTS=7890,7891,7892 自定义（改后重启服务生效）。
       </div>
     </div>
   </div>
@@ -192,6 +197,7 @@ document.getElementById('nav').addEventListener('click',e=>{
   if(b.dataset.p==='local')loadLocal();
 });
 $('#token').addEventListener('change',()=>{refresh().catch(()=>{});loadNodes().catch(()=>{})});
+$('#token').value=localStorage.getItem('mpool_token')||'';
 let STATUS={};
 async function refresh(){
   try{
@@ -201,14 +207,21 @@ async function refresh(){
     $('#c-run').innerHTML=s.runtime_ok?'<span class="ok">运行中</span>':'<span class="err">未就绪</span>';
     $('#c-run').title=s.last_error||'';
     $('#c-nodes').textContent=s.node_count+' / '+s.node_ports;
+    const hp=Array.isArray(s.hub_ports)&&s.hub_ports.length===3?s.hub_ports:[7890,7891,7892];
+    $('#t-fixed').textContent=hp[0]+' 固定出口';
+    $('#t-rotate').textContent=hp[1]+' 轮换出口';
+    $('#t-assign').textContent=hp[2]+' 分配出口';
     $('#c-fixed').textContent=s.fixed_now||'（DIRECT 默认）';
     $('#c-rotate').textContent=s.rotate_now||'—';
     $('#c-assign').textContent=s.assign_now||'—';
     $('#c-fresh').textContent=s.cache_fresh;
+    const at=s.last_auto_test;
+    $('#c-auto').textContent=(STATUS.settings&&STATUS.settings.auto_test_s===0)&&!at?'已关闭（设置里可开）':(at?(at.error?('上次出错: '+at.error):(`上次 ${new Date(at.ts*1000).toLocaleTimeString()} · ${at.ok}/${at.total} 可用`)):'等待首轮…');
+    $('#c-auto').title='自动测速在服务器后台运行，与本网页是否打开无关';
     if(s.source){$('#src-box').style.display='block';$('#src-info').textContent=`${s.source.name} · ${s.source.size}B · sha:${s.source.sha256} · 导入于 ${s.source.imported_at}`;}
     $('#src-err').textContent=s.last_error||'';
     const st=await api('/api/v1/settings');const x=st.settings;
-    $('#s-nname').value=x.node_name||'';$('#s-max').value=x.max_ms;$('#s-int').value=x.interval_s;$('#s-kw').value=x.keywords;$('#s-ttl').value=x.ttl_s;$('#s-url').value=x.test_url;
+    $('#s-nname').value=x.node_name||'';$('#s-max').value=x.max_ms;$('#s-int').value=x.interval_s;$('#s-kw').value=x.keywords;$('#s-ttl').value=x.ttl_s;$('#s-url').value=x.test_url;$('#s-auto').value=x.auto_test_s;
     buildApi();
   }catch(e){toast('加载失败: '+e.message,1)}
 }
@@ -218,7 +231,7 @@ async function loadNodes(){
   const max=STATUS.settings?STATUS.settings.max_ms:500;
   $('#nodes-body').innerHTML=d.nodes.length?d.nodes.map(n=>{
     let dcls,dtxt;
-    if(n.delay_ms==null){dcls='d-bad';dtxt='超时/未测'}
+    if(n.delay_ms==null){if(n.tested){dcls='d-bad';dtxt='超时'}else{dcls='muted';dtxt='未测'}}
     else{dcls=n.delay_ms<=max?'d-ok':'d-bad';dtxt=n.delay_ms+'ms'}
     return `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${n.listener_port??'—'}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td><button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button></td></tr>`;
   }).join(''):'<tr><td colspan="6" class="muted">没有节点</td></tr>';
@@ -250,7 +263,7 @@ async function loadHistory(){
 }
 async function restore(f){try{const d=await api('/api/v1/history/restore',{method:'POST',body:JSON.stringify({file:f})});toast('已恢复：'+d.reload.nodes+' 节点');refresh()}catch(e){toast(e.message,1)}}
 async function saveSettings(){
-  try{    await api('/api/v1/settings',{method:'POST',body:JSON.stringify({node_name:$('#s-nname').value,max_ms:+$('#s-max').value,interval_s:+$('#s-int').value,keywords:$('#s-kw').value,ttl_s:+$('#s-ttl').value,test_url:$('#s-url').value.trim()})});toast('已保存');refresh()}catch(e){toast(e.message,1)}
+  try{    await api('/api/v1/settings',{method:'POST',body:JSON.stringify({node_name:$('#s-nname').value,max_ms:+$('#s-max').value,interval_s:+$('#s-int').value,keywords:$('#s-kw').value,ttl_s:+$('#s-ttl').value,test_url:$('#s-url').value.trim(),auto_test_s:+$('#s-auto').value})});toast('已保存');refresh()}catch(e){toast(e.message,1)}
 }
 async function loadLocal(){
   try{
@@ -299,7 +312,18 @@ curl -X POST "${b}/api/v1/nodes/test" -H "X-Token: ${t}" -d '{}'
 curl -X POST "${b}/api/v1/fixed" -H "X-Token: ${t}" -d '{"node":"🇭🇰 HK-01"}'
 curl -X POST "${b}/api/v1/rotate" -H "X-Token: ${t}" -d '{}'
 # 修改设置
-curl -X POST "${b}/api/v1/settings" -H "X-Token: ${t}" -d '{"max_ms":500,"interval_s":300,"keywords":"香港,家庭"}'`;
+curl -X POST "${b}/api/v1/settings" -H "X-Token: ${t}" -d '{"max_ms":500,"interval_s":300,"keywords":"香港,家庭","auto_test_s":300}'
+
+━━ 出口端口用法（IP 换成服务器地址；7890=固定 7891=轮换 7892=分配）━━
+# curl 走代理
+curl -x http://<IP>:7890 https://api.ipify.org        # 固定出口
+curl -x http://<IP>:7891 https://api.ipify.org        # 轮换出口（每 interval_s 秒自动换）
+# python requests
+requests.get("https://api.ipify.org", proxies={"http":"http://<IP>:7890","https":"http://<IP>:7890"})
+# 环境变量（git / pip / npm 等命令行工具通用）
+export http_proxy=http://<IP>:7890 https_proxy=http://<IP>:7890
+# 7892：先按账号取粘性端口（同 key 恒定），也可直接用 7892 本身
+curl "${b}/api/v1/pick?key=账号ID" -H "X-Token: ${t}"   # 返回该账号专属节点与端口`;
 }
 refresh().then(()=>{loadNodes()}).catch(()=>{});
 loadHistory();

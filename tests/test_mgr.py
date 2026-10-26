@@ -64,6 +64,7 @@ class TestInject(unittest.TestCase):
         p.controller_addr = "127.0.0.1:9090"
         p.secret = "sec"
         p.settings = dict(m.DEFAULT_SETTINGS)
+        p.hub_ports = (7890, 7891, 7892)
         p.local = {"uuid": "u-1", "path": "/ws-x", "mixed_port": 7893, "vless_port": 17990, "cfws_port": 8443, "cf_base": "example.live"}
         p.local_path = os.path.join(tempfile.gettempdir(), "mpool-test-local-%d.json" % os.getpid())
         p.log = lambda s: None
@@ -270,6 +271,44 @@ class TestSettings(unittest.TestCase):
                 p.update_settings({"max_ms": 10})
             with self.assertRaises(m.PoolError):
                 p.update_settings({"test_url": "ftp://x"})
+
+    def test_update_auto_test_s(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            self.assertEqual(p.settings["auto_test_s"], 300)
+            self.assertEqual(p.update_settings({"auto_test_s": 60})["auto_test_s"], 60)
+            self.assertEqual(p.update_settings({"auto_test_s": 0})["auto_test_s"], 0)
+            with self.assertRaises(m.PoolError):
+                p.update_settings({"auto_test_s": 90000})
+            with self.assertRaises(m.PoolError):
+                p.update_settings({"auto_test_s": -1})
+
+    def test_custom_hub_ports_in_listeners(self):
+        p = TestInject._fake_pool(self)
+        p.hub_ports = (18000, 18001, 18002)
+        doc = TestInject._doc(self)
+        p._phase1_doc(doc)
+        listeners = {l["name"]: l for l in doc["listeners"]}
+        self.assertEqual(listeners["HUB-IN-18000"]["port"], 18000)
+        self.assertEqual(listeners["HUB-IN-18000"]["proxy"], "HUB-FIXED")
+        self.assertEqual(listeners["HUB-IN-18001"]["proxy"], "HUB-ROTATE")
+        self.assertEqual(listeners["HUB-IN-18002"]["proxy"], "HUB-ASSIGN")
+
+    def test_nodes_view_tested_flag(self):
+        p = TestInject._fake_pool(self)
+        p.node_list = ["a", "b", "c"]
+        p.node_types = {}
+        p.port_map = {}
+        p.cache = m.DelayCache()
+        p.cache.put("a", 123)
+        p.cache.put("b", None)
+        view = {n["name"]: n for n in p.nodes_view()}
+        self.assertEqual(view["a"]["delay_ms"], 123)
+        self.assertTrue(view["a"]["tested"])
+        self.assertIsNone(view["b"]["delay_ms"])
+        self.assertTrue(view["b"]["tested"])
+        self.assertIsNone(view["c"]["delay_ms"])
+        self.assertFalse(view["c"]["tested"])
 
     def test_persist_roundtrip(self):
         import json

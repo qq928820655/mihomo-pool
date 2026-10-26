@@ -38,6 +38,11 @@ TOKEN = ENV.get("MPOOL_TOKEN") or ""
 CONTROLLER = ENV.get("MPOOL_CONTROLLER") or "127.0.0.1:9090"
 LISTEN_BASE = int(ENV.get("MPOOL_LISTEN_BASE") or "17901")
 LISTEN_MAX = int(ENV.get("MPOOL_LISTEN_MAX") or "32")
+HUB_PORTS = tuple(
+    int(x)
+    for x in (ENV.get("MPOOL_HUB_PORTS") or "7890,7891,7892").split(",")
+    if x.strip().isdigit()
+) or (7890, 7891, 7892)
 BIN = os.path.join(ROOT, ENV.get("MPOOL_BIN") or "bin/mihomo")
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
 
@@ -52,6 +57,7 @@ POOL = mgr_mod.Pool(
     controller_addr=CONTROLLER,
     listen_base=LISTEN_BASE,
     listen_max=LISTEN_MAX,
+    hub_ports=HUB_PORTS,
     log=log,
     mixed_port=int(ENV.get("MPOOL_LOCAL_PORT") or "7893"),
     vless_port=int(ENV.get("MPOOL_LOCAL_VLESS_PORT") or "17990"),

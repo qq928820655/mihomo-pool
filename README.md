@@ -15,7 +15,26 @@
 | 17990 | **本地直连 vmess 节点**（UUID 认证，出口=本机 DIRECT），给 clash 客户端当节点用，`MPOOL_LOCAL_VLESS_PORT` 可改 |
 | 9090 | mihomo external-controller（仅 127.0.0.1，随机 secret，位于 `runtime/secret`） |
 
-7890/7891/7892 均为 mixed 端口（HTTP + SOCKS5 皆可），出站被固定钉在对应选择组，不走规则。
+7890/7891/7892 均为 mixed 端口（HTTP + SOCKS5 皆可），出站被固定钉在对应选择组，不走规则。三个 Hub 端口可在 `.env` 用 `MPOOL_HUB_PORTS=7890,7891,7892` 整体自定义（改后重启服务生效）。
+
+## 出口端口怎么用（外部调用示例）
+
+```bash
+# curl 走代理
+curl -x http://<服务器IP>:7890 https://api.ipify.org   # 固定出口
+curl -x http://<服务器IP>:7891 https://api.ipify.org   # 轮换出口（每 interval_s 秒自动换）
+
+# python requests
+python3 -c 'import requests;print(requests.get("https://api.ipify.org",proxies={"http":"http://<IP>:7890","https":"http://<IP>:7890"}).text)'
+
+# 环境变量（git / pip / npm / curl 等命令行通用）
+export http_proxy=http://<IP>:7890 https_proxy=http://<IP>:7890
+
+# 7892 粘性：先按账号取端口（同一 key 恒定），也可直接把请求打到 7892
+curl "http://<IP>:8006/api/v1/pick?key=账号ID" -H "X-Token: <token>"
+```
+
+面板「API」页有同款可复制示例（自动填当前地址与 Token）。
 
 ## 快速开始
 
@@ -53,6 +72,8 @@ POST /api/v1/history/restore {"file":"..."}      恢复历史版本
 - **门限**：只有测速延迟 ≤ `max_ms`（默认 500ms）的节点才算可用；轮换、pick、assign 全部遵守。
 - **关键词**：逗号分隔（中英文逗号都行），**命中任一**即匹配，大小写不敏感，空 = 不过滤。
 - 缓存 `ttl_s`（默认 30s）内不重复测速；缓存空且开了 refresh 的调用会现场测一次。
+- **自动测速**：`auto_test_s`（默认 300s，0=关）——服务器后台线程定时测全部节点并更新缓存，7891/7892/pick 自动避开超时节点；**与网页无关，关掉浏览器照常运行**（概览页可看上次结果）。节点列表里「未测」=本轮还没测过，「超时」=测了但没通过。
+- **面板 Token**：只用于打开面板/API 鉴权，输入一次自动存浏览器 localStorage（输入框掩码显示），刷新/重开不用再输。
 
 ## 与 Hub / CPA 对接
 
@@ -81,4 +102,4 @@ POST /api/v1/history/restore {"file":"..."}      恢复历史版本
 - 首次导入含 `GEOIP` 规则的机场配置时，mihomo 会自动下载 geoip 数据库（走 GitHub），第一次重载会慢几秒。
 - 运行时配置 `runtime/config.yaml` 是生成的，别手改；改 `configs/source.yaml` 或重新导入后 reload。
 - 日志：`runtime/service.log`（服务）+ `runtime/mihomo.log`（内核）。
-- 测试：`.venv/bin/python tests/run_all.py`（40 例）。
+- 测试：`.venv/bin/python tests/run_all.py`（50 例）。

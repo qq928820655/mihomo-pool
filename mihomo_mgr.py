@@ -37,6 +37,7 @@ DEFAULT_SETTINGS = {
     "ttl_s": 30,
     "fixed_node": "",
     "node_name": "",
+    "auto_test_s": 300,
 }
 
 
@@ -176,13 +177,14 @@ class DelayCache:
 
 
 class Pool:
-    def __init__(self, root, bin_path, controller_addr, listen_base=17901, listen_max=32, log=None, mixed_port=7893, vless_port=17990, cfws_port=8443, singbox_bin=None):
+    def __init__(self, root, bin_path, controller_addr, listen_base=17901, listen_max=32, log=None, mixed_port=7893, vless_port=17990, cfws_port=8443, singbox_bin=None, hub_ports=(7890, 7891, 7892)):
         self.root = os.path.abspath(root)
         self.bin_path = os.path.abspath(bin_path)
         self.singbox_bin = os.path.abspath(singbox_bin) if singbox_bin else os.path.join(os.path.dirname(os.path.abspath(bin_path)), "sing-box")
         self.controller_addr = controller_addr
         self.listen_base = int(listen_base)
         self.listen_max = max(1, int(listen_max))
+        self.hub_ports = tuple(int(p) for p in hub_ports) or (7890, 7891, 7892)
         self.log = log or (lambda msg: None)
         self.cfg_dir = os.path.join(self.root, "configs")
         self.hist_dir = os.path.join(self.cfg_dir, "history")
@@ -212,6 +214,10 @@ class Pool:
         self._rot_stop = threading.Event()
         self._rot_thread = None
         self._next_rotate = 0.0
+        self._auto_stop = threading.Event()
+        self._auto_thread = None
+        self._next_auto = 0.0
+        self.last_auto_test = None
 
     def _load_secret(self):
         if os.path.exists(self.secret_path):
@@ -481,6 +487,11 @@ class Pool:
                 if not 5 <= val <= 600:
                     raise PoolError("ttl_s 需在 5-600 之间")
                 clean["ttl_s"] = val
+            if "auto_test_s" in patch:
+                val = int(patch["auto_test_s"])
+                if not 0 <= val <= 86400:
+                    raise PoolError("auto_test_s 需在 0-86400 之间（0=关闭）")
+                clean["auto_test_s"] = val
             if "keywords" in patch:
                 clean["keywords"] = str(patch["keywords"] or "").strip()
             if "test_url" in patch:
@@ -540,6 +551,12 @@ class Pool:
         self.log("config imported: %s (%d bytes)" % (name, len(data)))
         return meta
 
+    def _hub_listeners(self):
+        return [
+            {"name": "HUB-IN-%d" % p, "type": "mixed", "port": p, "proxy": g}
+            for p, g in zip(self.hub_ports, (GROUP_FIXED, GROUP_ROTATE, GROUP_ASSIGN))
+        ]
+
     def _phase1_doc(self, doc):
         removed = {}
         for key in PORT_KEYS:
@@ -549,11 +566,7 @@ class Pool:
         doc["external-controller"] = self.controller_addr
         doc["secret"] = self.secret
         doc["log-level"] = "info"
-        doc["listeners"] = [
-            {"name": "HUB-IN-7890", "type": "mixed", "port": 7890, "proxy": GROUP_FIXED},
-            {"name": "HUB-IN-7891", "type": "mixed", "port": 7891, "proxy": GROUP_ROTATE},
-            {"name": "HUB-IN-7892", "type": "mixed", "port": 7892, "proxy": GROUP_ASSIGN},
-        ] + self._local_listeners()
+        doc["listeners"] = self._hub_listeners() + self._local_listeners()
         groups = doc.get("proxy-groups")
         if not isinstance(groups, list):
             groups = []
@@ -569,11 +582,7 @@ class Pool:
             for g in doc.get("proxy-groups", []):
                 if isinstance(g, dict) and g.get("name") == gname:
                     g["proxies"] = list(names) + ["DIRECT"]
-        listeners = [
-            {"name": "HUB-IN-7890", "type": "mixed", "port": 7890, "proxy": GROUP_FIXED},
-            {"name": "HUB-IN-7891", "type": "mixed", "port": 7891, "proxy": GROUP_ROTATE},
-            {"name": "HUB-IN-7892", "type": "mixed", "port": 7892, "proxy": GROUP_ASSIGN},
-        ] + self._local_listeners()
+        listeners = self._hub_listeners() + self._local_listeners()
         port_map = {}
         for idx, name in enumerate(names[: self.listen_max]):
             port = self.listen_base + idx
@@ -618,6 +627,7 @@ class Pool:
                 if fixed in names:
                     self.ctrl.select(GROUP_FIXED, fixed)
                 self._ensure_rotation()
+                self._ensure_autotest()
                 self.log(
                     "reload ok: %d nodes, %d node ports (%d..%d), removed inbounds=%s dropped_listeners=%d"
                     % (len(names), len(port_map), self.listen_base, self.listen_base + len(port_map) - 1, sorted(removed), dropped_listeners)
@@ -771,6 +781,38 @@ class Pool:
     def stop_rotation(self):
         self._rot_stop.set()
 
+    def _ensure_autotest(self):
+        if self._auto_thread and self._auto_thread.is_alive():
+            return
+        self._auto_stop.clear()
+        self._next_auto = 0.0
+        self._auto_thread = threading.Thread(target=self._auto_loop, name="autotest", daemon=True)
+        self._auto_thread.start()
+
+    def _auto_loop(self):
+        while not self._auto_stop.wait(1.0):
+            try:
+                period = int(self.settings.get("auto_test_s") or 0)
+                if period <= 0 or not self.runtime_ok:
+                    continue
+                now = time.time()
+                if now < self._next_auto:
+                    continue
+                self._next_auto = now + period
+                res = self.refresh_delays()
+                ok = [v for v in res.values() if isinstance(v, int)]
+                self.last_auto_test = {"ts": time.time(), "total": len(self.node_list), "ok": len(ok)}
+                self.log(
+                    "auto-test: %d/%d ok%s"
+                    % (len(ok), len(self.node_list), (" best=%dms" % min(ok)) if ok else "")
+                )
+            except Exception as exc:
+                self.last_auto_test = {"ts": time.time(), "error": str(exc)}
+                self.log("auto-test error: %s" % exc)
+
+    def stop_autotest(self):
+        self._auto_stop.set()
+
     def set_fixed(self, node):
         with self._lock:
             if node not in self.node_list:
@@ -818,6 +860,7 @@ class Pool:
                     "name": name,
                     "type": self.node_types.get(name, ""),
                     "delay_ms": fresh.get(name),
+                    "tested": name in fresh,
                     "listener_port": self.port_map.get(name),
                     "match": keywords_match(name, keywords if keywords else self.settings["keywords"]),
                 }
@@ -832,6 +875,8 @@ class Pool:
             "controller": self.controller_addr,
             "listen_base": self.listen_base,
             "listen_max": self.listen_max,
+            "hub_ports": list(self.hub_ports),
+            "last_auto_test": self.last_auto_test,
             "node_count": len(self.node_list),
             "node_ports": len(self.port_map),
             "settings": dict(self.settings),
