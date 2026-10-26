@@ -82,24 +82,23 @@ POST /api/v1/history/restore {"file":"..."}      恢复历史版本
 
 ## 把本服务器当节点用
 
-出口都是本机 DIRECT：7893 直接当 HTTP/SOCKS 代理；或把下面节点加进 clash（凭据看面板「本地节点」tab 或 `GET /api/v1/local`）：
+面板「本地节点」tab / `GET /api/v1/local` 提供 yaml 下载、订阅地址与 vmess 链接，含**五个节点**：
 
-```yaml
-- name: "vps-direct"
-  type: vmess
-  server: <本机公网IP>
-  port: 17990
-  uuid: <见 /api/v1/local>
-  alterId: 0
-  cipher: auto
-  udp: true
-```
+| 节点 | 链路 | 出口 |
+|---|---|---|
+| `<名>-CF(推荐)` | CF 域名 443 → sing-box(8443) | 本机 DIRECT |
+| `<名>-CF-固定` | CF 域名 443 → sing-box(8444) | 桥接 Hub 固定出口(7890) |
+| `<名>-CF-轮换` | CF 域名 443 → sing-box(8445) | 桥接 Hub 轮换出口(7891) |
+| `<名>-CF-分配` | CF 域名 443 → sing-box(8446) | 桥接 Hub 分配出口(7892) |
+| `<名>-直连IP` | 公网 IP:17990（需平台放行原始端口） | 本机 DIRECT |
 
-注意：平台 CF 域名是 HTTP 层终结，代理协议穿不过去，只能直连公网 IP；vmess 入站无法做无 TLS 的 ws（mihomo 限制）。
+CF 桥接端口（8444-8446）由平台自动映射为各自的 `<端口>-<域名>`；家里 clash 选 `-CF-轮换` 即可远程使用池子的轮换出口（速度受平台 CF 隧道 ~500KB/s 上限约束）。CF 域名自学习：开一次面板即自动记录。
+
+注意：平台 CF 域名是 HTTP 层终结，HTTP 代理 CONNECT / SOCKS5 直穿不过去（`域名:7890` 也不行，CF 边缘不监听该端口），所以远程用池子出口必须走上述 vmess+ws 节点。
 
 ## 注意
 
 - 首次导入含 `GEOIP` 规则的机场配置时，mihomo 会自动下载 geoip 数据库（走 GitHub），第一次重载会慢几秒。
 - 运行时配置 `runtime/config.yaml` 是生成的，别手改；改 `configs/source.yaml` 或重新导入后 reload。
 - 日志：`runtime/service.log`（服务）+ `runtime/mihomo.log`（内核）。
-- 测试：`.venv/bin/python tests/run_all.py`（50 例）。
+- 测试：`.venv/bin/python tests/run_all.py`（52 例）。

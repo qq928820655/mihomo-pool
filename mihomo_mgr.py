@@ -285,21 +285,46 @@ class Pool:
         name = str(self.settings.get("node_name") or "").strip()
         return name or (public_ip or "vps")
 
+    def cfws_bridge_ports(self):
+        base = int(self.local["cfws_port"])
+        return (base + 1, base + 2, base + 3)
+
+    def cf_domain_for(self, port):
+        base = self.local.get("cf_base") or ""
+        return "%s-%s" % (port, base) if base else ""
+
     def _singbox_config(self):
-        return {
-            "log": {"level": "warn", "timestamp": True},
-            "inbounds": [
+        bridges = (
+            ("fixed", self.cfws_bridge_ports()[0], self.hub_ports[0]),
+            ("rotate", self.cfws_bridge_ports()[1], self.hub_ports[1]),
+            ("assign", self.cfws_bridge_ports()[2], self.hub_ports[2]),
+        )
+        inbounds = [
+            {
+                "type": "vmess",
+                "tag": "cfws-in",
+                "listen": "::",
+                "listen_port": int(self.local["cfws_port"]),
+                "users": [{"uuid": self.local["uuid"], "alterId": 0}],
+                "transport": {"type": "ws", "path": self.local["path"]},
+            }
+        ]
+        for kind, port, _ in bridges:
+            inbounds.append(
                 {
                     "type": "vmess",
-                    "tag": "cfws-in",
+                    "tag": "cfws-%s" % kind,
                     "listen": "::",
-                    "listen_port": int(self.local["cfws_port"]),
+                    "listen_port": int(port),
                     "users": [{"uuid": self.local["uuid"], "alterId": 0}],
-                    "transport": {"type": "ws", "path": self.local["path"]},
+                    "transport": {"type": "ws", "path": "%s-%s" % (self.local["path"], kind)},
                 }
-            ],
-            "outbounds": [{"type": "direct", "tag": "direct"}],
-        }
+            )
+        outbounds = [{"type": "direct", "tag": "direct"}]
+        for kind, _, hub in bridges:
+            outbounds.append({"type": "http", "tag": "hub-%s" % kind, "server": "127.0.0.1", "server_port": int(hub)})
+        rules = [{"inbound": "cfws-%s" % kind, "outbound": "hub-%s" % kind} for kind, _, _ in bridges]
+        return {"log": {"level": "warn", "timestamp": True}, "inbounds": inbounds, "outbounds": outbounds, "route": {"rules": rules}}
 
     def ensure_singbox(self):
         if self.singbox_proc and self.singbox_proc.poll() is None:
@@ -362,23 +387,29 @@ class Pool:
         server = str(public_ip or "").strip() or "<服务器公网IP>"
         nodes = []
         if domain:
-            nodes.append(
-                {
-                    "name": "%s-CF(推荐)" % name,
+            b_fixed, b_rotate, b_assign = self.cfws_bridge_ports()
+            for suffix, kind, bport in (
+                ("-CF(推荐)", "", 0),
+                ("-CF-固定", "fixed", b_fixed),
+                ("-CF-轮换", "rotate", b_rotate),
+                ("-CF-分配", "assign", b_assign),
+            ):
+                node = {
+                    "name": "%s%s" % (name, suffix),
                     "type": "vmess",
-                    "server": domain,
-                    "port": 443,
+                    "server": self.cf_domain_for(bport) if bport else domain,
+                    "port": bport or 443,
                     "uuid": loc["uuid"],
                     "alterId": 0,
                     "cipher": "auto",
                     "udp": True,
                     "network": "ws",
                     "tls": True,
-                    "servername": domain,
+                    "servername": self.cf_domain_for(bport) if bport else domain,
                     "client-fingerprint": "chrome",
-                    "ws-opts": {"path": loc["path"]},
+                    "ws-opts": {"path": loc["path"] + ("-%s" % kind if kind else "")},
                 }
-            )
+                nodes.append(node)
         nodes.append(
             {
                 "name": "%s-直连IP" % name,

@@ -97,6 +97,20 @@ class TestInject(unittest.TestCase):
         p.settings["node_name"] = "家庭宽带"
         self.assertEqual(p.node_display_name("1.2.3.4"), "家庭宽带")
 
+    def test_singbox_config_hub_bridges(self):
+        p = TestInject._fake_pool(self)
+        p.hub_ports = (7890, 7891, 7892)
+        cfg = p._singbox_config()
+        self.assertEqual([i["tag"] for i in cfg["inbounds"]], ["cfws-in", "cfws-fixed", "cfws-rotate", "cfws-assign"])
+        self.assertEqual([i["listen_port"] for i in cfg["inbounds"]], [8443, 8444, 8445, 8446])
+        self.assertEqual(
+            [i["transport"]["path"] for i in cfg["inbounds"]],
+            ["/ws-x", "/ws-x-fixed", "/ws-x-rotate", "/ws-x-assign"],
+        )
+        out = {o["tag"]: o for o in cfg["outbounds"]}
+        self.assertEqual((out["hub-fixed"]["server_port"], out["hub-rotate"]["server_port"], out["hub-assign"]["server_port"]), (7890, 7891, 7892))
+        self.assertEqual(cfg["route"]["rules"][0], {"inbound": "cfws-fixed", "outbound": "hub-fixed"})
+
     def test_local_node_yaml(self):
         import yaml as _yaml
         p = self._fake_pool()
@@ -104,11 +118,26 @@ class TestInject(unittest.TestCase):
         doc = _yaml.safe_load(text)
         self.assertEqual(doc["mixed-port"], 7890)
         names = [n["name"] for n in doc["proxies"]]
-        self.assertEqual(names, ["1.2.3.4-CF(推荐)", "1.2.3.4-直连IP"])
+        self.assertEqual(
+            names,
+            [
+                "1.2.3.4-CF(推荐)",
+                "1.2.3.4-CF-固定",
+                "1.2.3.4-CF-轮换",
+                "1.2.3.4-CF-分配",
+                "1.2.3.4-直连IP",
+            ],
+        )
         cf = doc["proxies"][0]
         self.assertEqual((cf["server"], cf["port"], cf["network"], cf["tls"]), ("8443-example.live", 443, "ws", True))
         self.assertEqual(cf["ws-opts"]["path"], "/ws-x")
-        direct = doc["proxies"][1]
+        self.assertEqual((doc["proxies"][1]["server"], doc["proxies"][1]["port"]), ("8444-example.live", 8444))
+        self.assertEqual(doc["proxies"][1]["ws-opts"]["path"], "/ws-x-fixed")
+        self.assertEqual((doc["proxies"][2]["server"], doc["proxies"][2]["port"]), ("8445-example.live", 8445))
+        self.assertEqual(doc["proxies"][2]["ws-opts"]["path"], "/ws-x-rotate")
+        self.assertEqual((doc["proxies"][3]["server"], doc["proxies"][3]["port"]), ("8446-example.live", 8446))
+        self.assertEqual(doc["proxies"][3]["ws-opts"]["path"], "/ws-x-assign")
+        direct = doc["proxies"][4]
         self.assertEqual((direct["server"], direct["port"]), ("1.2.3.4", 17990))
         self.assertEqual(doc["rules"], ["MATCH,PROXY"])
         self.assertEqual(doc["proxy-groups"][0]["proxies"], names)
@@ -129,7 +158,7 @@ rules:
 """
         doc = _yaml.safe_load(p.merged_yaml(their, "1.2.3.4", p.cf_domain()))
         names = [n["name"] for n in doc["proxies"]]
-        self.assertEqual(len(names), 3)
+        self.assertEqual(len(names), 6)
         self.assertIn("1.2.3.4-CF(推荐)", names)
         self.assertIn("1.2.3.4-直连IP", names)
         sel = {g["name"]: g["proxies"] for g in doc["proxy-groups"]}
@@ -137,7 +166,7 @@ rules:
         self.assertIn("1.2.3.4-直连IP", sel["其他手动"])
         self.assertEqual(len(sel["自动测速"]), 1)
         again = _yaml.safe_load(p.merged_yaml(p.merged_yaml(their, "1.2.3.4", p.cf_domain()), "1.2.3.4", p.cf_domain()))
-        self.assertEqual(len(again["proxies"]), 3)
+        self.assertEqual(len(again["proxies"]), 6)
 
     def test_merged_yaml_rejects_base64_sub(self):
         p = self._fake_pool()

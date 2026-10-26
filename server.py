@@ -137,13 +137,23 @@ def local_view(headers):
     name = POOL.node_display_name(ip)
     links = {}
     if domain:
+        b_fixed, b_rotate, b_assign = POOL.cfws_bridge_ports()
         links["cf"] = vmess_link(name + "-CF", domain, 443, loc["uuid"], net="ws", host=domain, path=loc["path"], tls="tls")
+        links["cf_fixed"] = vmess_link(name + "-CF-固定", POOL.cf_domain_for(b_fixed), 443, loc["uuid"], net="ws", host=POOL.cf_domain_for(b_fixed), path=loc["path"] + "-fixed", tls="tls")
+        links["cf_rotate"] = vmess_link(name + "-CF-轮换", POOL.cf_domain_for(b_rotate), 443, loc["uuid"], net="ws", host=POOL.cf_domain_for(b_rotate), path=loc["path"] + "-rotate", tls="tls")
+        links["cf_assign"] = vmess_link(name + "-CF-分配", POOL.cf_domain_for(b_assign), 443, loc["uuid"], net="ws", host=POOL.cf_domain_for(b_assign), path=loc["path"] + "-assign", tls="tls")
     links["direct"] = vmess_link(name + "-直连IP", ip or "<服务器公网IP>", loc["vless_port"], loc["uuid"])
     snippet_lines = []
     if domain:
+        b_fixed, b_rotate, b_assign = POOL.cfws_bridge_ports()
         snippet_lines.append(
             "- name: \"%s-CF(推荐)\"\n  type: vmess\n  server: %s\n  port: 443\n  uuid: %s\n  alterId: 0\n  cipher: auto\n  udp: true\n  network: ws\n  tls: true\n  servername: %s\n  client-fingerprint: chrome\n  ws-opts:\n    path: %s" % (name, domain, loc["uuid"], domain, loc["path"])
         )
+        for suffix, kind, bport in (("-CF-固定", "fixed", b_fixed), ("-CF-轮换", "rotate", b_rotate), ("-CF-分配", "assign", b_assign)):
+            d = POOL.cf_domain_for(bport)
+            snippet_lines.append(
+                "- name: \"%s%s\"\n  type: vmess\n  server: %s\n  port: 443\n  uuid: %s\n  alterId: 0\n  cipher: auto\n  udp: true\n  network: ws\n  tls: true\n  servername: %s\n  client-fingerprint: chrome\n  ws-opts:\n    path: %s-%s" % (name, suffix, d, loc["uuid"], d, loc["path"], kind)
+            )
     snippet_lines.append(
         "- name: \"%s-直连IP\"\n  type: vmess\n  server: %s\n  port: %s\n  uuid: %s\n  alterId: 0\n  cipher: auto\n  udp: true" % (name, ip or "<服务器公网IP>", loc["vless_port"], loc["uuid"])
     )
@@ -158,7 +168,7 @@ def local_view(headers):
         "subscription_url": "%s/local-node.yaml" % origin,
         "vmess_urls": links,
         "snippets": {"clash": "\n".join(snippet_lines)},
-        "note": "CF=经平台域名 WebSocket（公网端口未放行时用它）；直连IP=需平台放行原始端口；出口都是本机 DIRECT",
+        "note": "CF=经平台域名 WebSocket（公网端口未放行时用它）；-CF-固定/-CF-轮换/-CF-分配=桥接到 Hub 三个出口端口；直连IP=需平台放行原始端口",
     }
 
 
