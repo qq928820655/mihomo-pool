@@ -375,6 +375,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/reload":
             res = POOL.reload()
             return self._json(200, {"ok": True, **res})
+        if path == "/api/v1/ports/bind":
+            body = self._json_body()
+            node = str(body.get("node") or "")
+            port = body.get("port")
+            res = POOL.bind_port(node, int(port) if port not in (None, "") else None)
+            return self._json(200, {"ok": True, **res})
         if path == "/api/v1/config/upload":
             name = (query.get("name") or ["upload.yaml"])[0]
             data = self._body()

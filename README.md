@@ -50,6 +50,11 @@ curl "http://<IP>:8006/api/v1/pick?key=账号ID" -H "X-Token: <token>"
 
 ## 分配 API
 
+- `GET /api/v1/pick?key=<账号ID>`：粘性分配，同 key 恒定同节点；无 key 随机。
+- `POST /api/v1/fixed {"node": ...}`：设置固定出口。
+- `POST /api/v1/ports/bind {"node": ..., "port": 17905}`：**手动钉端口**——把节点钉到指定端口，立即生效并持久化，重载/自动重排都保持（`port: null` 解除钉住，面板节点行「钉端口」按钮同效）；被占用/超范围/重复钉返回 409。
+- 面板「重载配置」= **一键按综合分重排全部端口**（钉住的除外）；每轮测速后死节点端口自动回收、按综合分补给。
+
 鉴权三选一：`Authorization: Bearer <token>` / `X-Token: <token>` / `?token=`。
 
 ```

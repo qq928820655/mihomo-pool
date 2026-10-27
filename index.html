@@ -286,11 +286,19 @@ async function loadNodes(){
     let dcls,dtxt;
     if(n.delay_ms==null){if(n.tested){dcls='d-bad';dtxt='超时'}else{dcls='muted';dtxt='未测'}}
     else{dcls=n.delay_ms<=max?'d-ok':'d-bad';dtxt=n.delay_ms+'ms'}
-    return `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${qcell(n.quality)}</td><td>${n.listener_port??'—'}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td><button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button></td></tr>`;
+    return `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${qcell(n.quality)}</td><td>${n.listener_port??'—'}${n.pinned?' 📌':''}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td><button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button> <button class="btn mini" onclick="pinPort(this)" data-n="${esc(n.name)}" data-p="${n.listener_port??''}">钉端口</button></td></tr>`;
   }).join(''):'<tr><td colspan="6" class="muted">'+(d.nodes.length?'没有匹配的节点':'没有节点')+'</td></tr>';
 }
 async function setFixed(btn){
   try{const d=await api('/api/v1/fixed',{method:'POST',body:JSON.stringify({node:btn.dataset.n})});toast('固定出口 → '+d.node);refresh()}catch(e){toast(e.message,1)}
+}
+async function pinPort(btn){
+  const n=btn.dataset.n;
+  const lo=STATUS.listen_base||17901,hi=lo+(STATUS.listen_max||32)-1;
+  const v=prompt('把「'+n+'」钉到哪个端口？('+lo+'-'+hi+'，留空=解除钉住)',btn.dataset.p||'');
+  if(v===null)return;
+  try{const d=await api('/api/v1/ports/bind',{method:'POST',body:JSON.stringify({node:n,port:v.trim()?parseInt(v.trim(),10):null})});
+    toast(v.trim()?('已钉住 '+n+' → :'+d.port):('已解除 '+n+' 的钉住'));loadNodes()}catch(e){toast(e.message,1)}
 }
 async function testAll(){
   try{const d=await api('/api/v1/nodes/test',{method:'POST',body:'{}'});toast('测速完成，成功 '+d.count+' 个');loadNodes();refresh()}catch(e){toast(e.message,1)}

@@ -67,6 +67,7 @@ class TestInject(unittest.TestCase):
         p.settings = dict(m.DEFAULT_SETTINGS)
         p.hub_ports = (7890, 7891, 7892)
         p.ipq_port = 7894
+        p.port_pins = {}
         p.last_delays = {}
         p.node_quality = {}
         p.local = {"uuid": "u-1", "path": "/ws-x", "mixed_port": 7893, "vless_port": 17990, "cfws_port": 8443, "cf_base": "example.live"}
@@ -325,6 +326,74 @@ class TestInject(unittest.TestCase):
             p._port_order(list(p.last_delays)),
             ["fast-clean", "mid-clean", "fast-proxy", "slow-clean"],
         )
+
+    def test_phase2_honors_pins(self):
+        p = TestInject._fake_pool(self)
+        p.listen_base, p.listen_max = 17901, 4
+        p.port_pins = {"b": 17903}
+        p.last_delays = {"a": 100, "b": 900, "c": 200, "d": 300, "e": 400}
+        p.node_quality = {}
+        doc = {"proxy-groups": []}
+        port_map = p._phase2_doc(doc, ["a", "b", "c", "d", "e"])
+        self.assertEqual(port_map["b"], 17903)  # 钉住优先
+        self.assertEqual(sorted(port_map.values()), [17901, 17902, 17903, 17904])
+        by_port = {l["port"]: l["proxy"] for l in doc["listeners"] if l["name"].startswith("HUB-E")}
+        self.assertEqual(by_port[17903], "b")
+        self.assertEqual(len(by_port), 4)
+
+    def test_remap_refill_prefers_pin(self):
+        p = TestInject._fake_pool(self)
+        p.listen_base, p.listen_max = 17901, 2
+        p.port_map = {"a": 17901, "b": 17902}
+        p.port_pins = {"c": 17902}
+        p.last_delays = {"a": 100, "c": 50}
+        p.node_quality = {}
+        p._reselect_alive_defaults = lambda alive: None
+        doc = {"listeners": []}
+        with tempfile.TemporaryDirectory() as d:
+            p.runtime_path = os.path.join(d, "config.yaml")
+            with open(p.runtime_path, "w", encoding="utf-8") as fh:
+                fh.write("listeners: []\n")
+
+            class FakeCtrl:
+                def load_config(self, path):
+                    FakeCtrl.loads += 1
+            FakeCtrl.loads = 0
+            p.ctrl = FakeCtrl()
+            p._remap_ports_to_alive({"a": 100, "c": 50})
+        self.assertEqual(p.port_map, {"a": 17901, "c": 17902})  # b 死后 c 依钉住拿回 17902
+
+    def test_bind_port(self):
+        import threading as _th
+        with tempfile.TemporaryDirectory() as d:
+            p = TestInject._fake_pool(self)
+            p._lock = _th.RLock()
+            p.listen_base, p.listen_max = 17901, 4
+            p.node_list = ["a", "b", "c"]
+            p.port_map = {"a": 17901, "b": 17902}
+            p.port_pins = {}
+            p._pins_path = os.path.join(d, "pins.json")
+            p.runtime_path = os.path.join(d, "config.yaml")
+            with open(p.runtime_path, "w", encoding="utf-8") as fh:
+                fh.write("listeners: []\n")
+
+            class FakeCtrl:
+                def load_config(self, path):
+                    pass
+            p.ctrl = FakeCtrl()
+            res = p.bind_port("c", 17904)
+            self.assertEqual((res["pinned"], p.port_map["c"]), (True, 17904))
+            self.assertEqual(p._load_pins().get("c"), 17904)
+            with self.assertRaises(m.PoolError):
+                p.bind_port("c", 17901)  # 被 a 占用
+            with self.assertRaises(m.PoolError):
+                p.bind_port("a", 17905)  # 超范围
+            with self.assertRaises(m.PoolError):
+                p.bind_port("nope", 17903)  # 节点不存在
+            res = p.bind_port("c", None)
+            # 解绑只解除钉住，节点保留当前端口直到下次重排/重载
+            self.assertEqual((res["pinned"], p.port_map.get("c")), (False, 17904))
+            self.assertNotIn("c", p._load_pins())
 
     def test_update_ipq_enabled(self):
         with tempfile.TemporaryDirectory() as d:

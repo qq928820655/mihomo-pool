@@ -286,6 +286,8 @@ class Pool:
         self.last_delays = self._load_last_delays()
         self.node_quality = {}
         self._ipq_path = os.path.join(self.runtime_dir, "ipq.json")
+        self._pins_path = os.path.join(self.runtime_dir, "port_pins.json")
+        self.port_pins = self._load_pins()
         self._ipq_cache = {"ips": {}, "node_ip": {}}
         self._load_ipq()
         self.proc = None
@@ -328,6 +330,21 @@ class Pool:
         order += [n for n in names if n not in alive and n not in dead]
         order += sorted(n for n in names if n in dead)
         return order
+
+    def _load_pins(self):
+        try:
+            with open(self._pins_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return {str(k): int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_pins(self):
+        try:
+            with open(self._pins_path, "w", encoding="utf-8") as fh:
+                json.dump(self.port_pins, fh, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
 
     def _load_ipq(self):
         try:
@@ -980,13 +997,18 @@ class Pool:
                 if isinstance(g, dict) and g.get("name") == gname:
                     g["proxies"] = list(names) + ["DIRECT"]
         listeners = self._hub_listeners() + self._local_listeners()
+        free = list(range(self.listen_base, self.listen_base + self.listen_max))
         port_map = {}
-        for idx, name in enumerate(self._port_order(names)[: self.listen_max]):
-            port = self.listen_base + idx
-            listeners.append(
-                {"name": "HUB-E%02d" % (idx + 1), "type": "mixed", "port": port, "proxy": name}
-            )
-            port_map[name] = port
+        for node, port in sorted(self.port_pins.items(), key=lambda kv: kv[1]):
+            if node in names and port in free:
+                port_map[node] = port
+                free.remove(port)
+        for name in self._port_order(names):
+            if name in port_map or not free:
+                continue
+            port_map[name] = free.pop(0)
+        for i, (node, port) in enumerate(sorted(port_map.items(), key=lambda kv: kv[1])):
+            listeners.append({"name": "HUB-E%02d" % (i + 1), "type": "mixed", "port": port, "proxy": node})
         doc["listeners"] = listeners
         return port_map
 
@@ -1195,9 +1217,22 @@ class Pool:
                 break
             if n in new_map:
                 continue
-            new_map[n] = free.pop(0)
+            pin = self.port_pins.get(n)
+            if pin in free:
+                new_map[n] = pin
+                free.remove(pin)
+            else:
+                new_map[n] = free.pop(0)
         if new_map == old_map:
             return
+        self._apply_port_map(new_map)
+        if self.port_map != new_map:
+            return
+        self._reselect_alive_defaults(alive)
+        self.log("port remap: %d alive ports (was %d) -> %s..." % (len(new_map), len(old_map), ", ".join("%s->%d" % (n, p) for n, p in sorted(new_map.items(), key=lambda kv: kv[1])[:3])))
+
+    def _apply_port_map(self, new_map):
+        """把端口映射写进运行时配置并热重载；成功才更新 self.port_map。"""
         try:
             with open(self.runtime_path, "r", encoding="utf-8") as fh:
                 doc = yaml.safe_load(fh)
@@ -1207,12 +1242,34 @@ class Pool:
             doc["listeners"] = listeners
             self._dump(doc, self.runtime_path)
             self.ctrl.load_config(self.runtime_path)
+            self.port_map = dict(new_map)
         except Exception as exc:
-            self.log("port remap failed: %s" % exc)
-            return
-        self.port_map = new_map
-        self._reselect_alive_defaults(alive)
-        self.log("port remap: %d alive ports (was %d) -> %s..." % (len(new_map), len(old_map), ", ".join("%s->%d" % (n, p) for n, p in sorted(new_map.items(), key=lambda kv: kv[1])[:3])))
+            self.log("port map apply failed: %s" % exc)
+
+    def bind_port(self, node, port):
+        """手动把节点钉到指定端口（port=None 解绑）。立即生效并持久化，重载/重排都保持。"""
+        with self._lock:
+            if node not in self.node_list:
+                raise PoolError("节点不存在: %s" % node)
+            if port is None:
+                self.port_pins.pop(node, None)
+                self._save_pins()
+                return {"node": node, "port": None, "pinned": False, "port_map": dict(self.port_map)}
+            port = int(port)
+            if not (self.listen_base <= port < self.listen_base + self.listen_max):
+                raise PoolError("端口超出范围 %d-%d" % (self.listen_base, self.listen_base + self.listen_max - 1))
+            for other, p in self.port_pins.items():
+                if other != node and p == port:
+                    raise PoolError("端口 %d 已被钉给 %s" % (port, other))
+            holder = next((n for n, p in self.port_map.items() if p == port and n != node), None)
+            if holder:
+                raise PoolError("端口 %d 正被 %s 使用" % (port, holder))
+            self.port_pins[node] = port
+            self._save_pins()
+            new_map = {n: p for n, p in self.port_map.items() if n != node}
+            new_map[node] = port
+            self._apply_port_map(new_map)
+            return {"node": node, "port": port, "pinned": True, "port_map": dict(self.port_map)}
 
     def gate(self, keywords=None, max_ms=None, refresh=False):
         kw = self.settings["keywords"] if keywords is None else keywords
@@ -1349,6 +1406,7 @@ class Pool:
                     "delay_ms": fresh.get(name),
                     "tested": name in fresh,
                     "listener_port": self.port_map.get(name),
+                    "pinned": name in self.port_pins,
                     "quality": self.node_quality.get(name),
                     "match": keywords_match(name, keywords if keywords else self.settings["keywords"]),
                 }
