@@ -564,8 +564,20 @@ class Pool:
             )
             return {"checked": len(fresh), "ports": len(ports), "probed": probed, "new": len(pending)}
 
+    def _eff_score(self, name):
+        """综合分 = 纯度 − min(50, 延迟ms/20) − 代理类型 8：快而干净的节点优先拿端口/固定出口。"""
+        score = self._qscore(name)
+        delay = self.last_delays.get(name)
+        if isinstance(delay, int):
+            score -= min(50, delay // 20)
+        q = self.node_quality.get(name)
+        if q and q.get("kind") == "代理":
+            score -= 8
+        return score
+
     def _qkey(self, name):
-        return (-self._qscore(name), self.last_delays.get(name) if isinstance(self.last_delays.get(name), int) else 9999)
+        delay = self.last_delays.get(name)
+        return (-self._eff_score(name), delay if isinstance(delay, int) else 9999)
 
     def _load_secret(self):
         if os.path.exists(self.secret_path):

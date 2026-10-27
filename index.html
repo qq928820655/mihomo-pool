@@ -272,7 +272,8 @@ async function loadNodes(){
       const ra=rank(a),rb=rank(b);
       if(ra!==rb)return ra-rb;
       if(ra===0){
-        const qa=a.quality?a.quality.score:60,qb=b.quality?b.quality.score:60;
+        const eff=n=>{let s=n.quality?n.quality.score:60;const d=n.delay_ms;if(typeof d==='number')s-=Math.min(50,Math.floor(d/20));if(n.quality&&n.quality.kind==='代理')s-=8;return s};
+        const qa=eff(a),qb=eff(b);
         if(qb!==qa)return qb-qa;
         return a.delay_ms-b.delay_ms;
       }

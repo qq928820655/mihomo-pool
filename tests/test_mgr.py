@@ -300,10 +300,31 @@ class TestInject(unittest.TestCase):
             "dirty-fast": {"score": 40, "ts": _t.time()},
         }
         self.assertEqual(p._port_order(["dirty-fast", "clean-slow"])[0], "clean-slow")
-        self.assertEqual(p._qkey("dirty-fast"), (-40, 50))
+        self.assertEqual(p._qkey("dirty-fast"), (-38, 50))
         stale = {"score": 95, "ts": _t.time() - 200000}
         p.node_quality["clean-slow"] = stale
         self.assertEqual(p._qscore("clean-slow"), 60)
+
+    def test_eff_score_delay_and_proxy_penalty(self):
+        # 综合分 = 纯度 − min(50, 延迟/20) − 代理 8：快而干净的节点优先拿端口
+        import time as _t
+        p = TestInject._fake_pool(self)
+        now = _t.time()
+        p.last_delays = {"fast-clean": 76, "slow-clean": 774, "fast-proxy": 80, "mid-clean": 200}
+        p.node_quality = {
+            "fast-clean": {"score": 100, "kind": "住宅", "ts": now},
+            "slow-clean": {"score": 100, "kind": "住宅", "ts": now},
+            "fast-proxy": {"score": 80, "kind": "代理", "ts": now},
+            "mid-clean": {"score": 96, "kind": "住宅", "ts": now},
+        }
+        self.assertEqual(p._eff_score("fast-clean"), 97)
+        self.assertEqual(p._eff_score("slow-clean"), 62)
+        self.assertEqual(p._eff_score("fast-proxy"), 68)
+        self.assertEqual(p._eff_score("mid-clean"), 86)
+        self.assertEqual(
+            p._port_order(list(p.last_delays)),
+            ["fast-clean", "mid-clean", "fast-proxy", "slow-clean"],
+        )
 
     def test_update_ipq_enabled(self):
         with tempfile.TemporaryDirectory() as d:
