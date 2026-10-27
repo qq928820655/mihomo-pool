@@ -215,6 +215,17 @@ class TestInject(unittest.TestCase):
         self.assertEqual((s, kind), (40, "代理"))
         self.assertEqual(m.ipq_score({"proxy": True, "mobile": True}), (80, "代理"))
 
+    def test_ipq_score_dual_source(self):
+        self.assertEqual(m.ipq_score({"risk_score": 0}), (100, "住宅"))
+        s, kind = m.ipq_score({"hosting": True, "risk_score": 80})
+        self.assertEqual((s, kind), (42, "机房"))
+        s, _ = m.ipq_score({"risk_score": 30, "is_vpn": True})
+        self.assertEqual(s, 78)
+        self.assertIsNone(m.ipq_risk_label(None))
+        self.assertEqual(m.ipq_risk_label(75), "高风险")
+        self.assertEqual(m.ipq_risk_label(40), "中风险")
+        self.assertEqual(m.ipq_risk_label(39), "低风险")
+
     def test_port_order_quality_first(self):
         p = TestInject._fake_pool(self)
         p.last_delays = {"dirty-fast": 50, "clean-slow": 300}

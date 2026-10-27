@@ -20,6 +20,7 @@ import uuid
 import yaml
 
 GROUP_FIXED = "HUB-FIXED"
+IPQ_TTL = 172800
 GROUP_ROTATE = "HUB-ROTATE"
 GROUP_ASSIGN = "HUB-ASSIGN"
 GROUPS = (GROUP_FIXED, GROUP_ROTATE, GROUP_ASSIGN)
@@ -39,24 +40,43 @@ DEFAULT_SETTINGS = {
     "node_name": "",
     "auto_test_s": 300,
     "ipq_enabled": 1,
+    "ipq_ipapi_key": "",
 }
 
 
 def ipq_score(info):
-    score = 100
+    parts = []
+    s1 = 100
     if info.get("hosting"):
-        score -= 35
+        s1 -= 35
     if info.get("proxy"):
-        score -= 25
+        s1 -= 25
     if info.get("mobile"):
-        score = min(100, score + 5)
+        s1 = min(100, s1 + 5)
+    parts.append(max(0, min(100, s1)))
+    if isinstance(info.get("risk_score"), int):
+        s2 = 100 - int(info["risk_score"])
+        if info.get("is_datacenter") or info.get("is_vpn") or info.get("is_proxy") or info.get("is_tor") or info.get("is_abuser"):
+            s2 -= 15
+        parts.append(max(0, min(100, s2)))
+    score = int(round(sum(parts) / len(parts)))
     if info.get("proxy"):
         kind = "代理"
     elif info.get("hosting"):
         kind = "机房"
     else:
         kind = "住宅"
-    return max(0, min(100, int(score))), kind
+    return score, kind
+
+
+def ipq_risk_label(risk_score):
+    if not isinstance(risk_score, int):
+        return None
+    if risk_score >= 75:
+        return "高风险"
+    if risk_score >= 40:
+        return "中风险"
+    return "低风险"
 
 
 class PoolError(Exception):
@@ -231,6 +251,7 @@ class Pool:
         self.last_delays = self._load_last_delays()
         self.node_quality = {}
         self._ipq_path = os.path.join(self.runtime_dir, "ipq.json")
+        self._ipq_cache = {"ips": {}}
         self._load_ipq()
         self.proc = None
         self.runtime_ok = False
@@ -279,13 +300,16 @@ class Pool:
                 data = json.load(fh)
             if isinstance(data, dict):
                 self.node_quality = data.get("nodes") if isinstance(data.get("nodes"), dict) else {}
+                ips = data.get("ips")
+                if isinstance(ips, dict):
+                    self._ipq_cache["ips"] = ips
         except (OSError, ValueError):
             self.node_quality = {}
 
     def _save_ipq(self):
         try:
             with open(self._ipq_path, "w", encoding="utf-8") as fh:
-                json.dump({"nodes": self.node_quality}, fh, ensure_ascii=False)
+                json.dump({"nodes": self.node_quality, "ips": self._ipq_cache.get("ips", {})}, fh, ensure_ascii=False)
         except OSError:
             pass
 
@@ -330,6 +354,21 @@ class Pool:
                 out[ip] = row
         return out
 
+    def _ipq_query_ipapi(self, ip):
+        try:
+            key = str(self.settings.get("ipq_ipapi_key") or "").strip()
+            url = "https://api.ipapi.is/?q=%s" % urllib.parse.quote(ip)
+            if key:
+                url += "&key=" + urllib.parse.quote(key)
+            req = urllib.request.Request(url, headers={"User-Agent": "mihomo-pool"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            if not isinstance(data, dict) or data.get("is_bogon"):
+                return None
+            return data
+        except Exception:
+            return None
+
     def check_ip_quality(self):
         with self._lock:
             if not int(self.settings.get("ipq_enabled") or 0):
@@ -342,34 +381,67 @@ class Pool:
                 ip = self._exit_ip_via_port(port)
                 if ip:
                     node_ip[node] = ip
-            uniq = sorted(set(node_ip.values()))
-            infos = self._ipq_query(uniq)
+            ips_cache = self._ipq_cache.setdefault("ips", {})
             now = time.time()
+            uniq = sorted(set(node_ip.values()))
+            pending = [ip for ip in uniq if not isinstance(ips_cache.get(ip), dict) or now - float(ips_cache[ip].get("ts") or 0) > IPQ_TTL]
+            infos = self._ipq_query(pending) if pending else {}
+            for ip in pending:
+                info = dict(infos.get(ip) or {})
+                extra = self._ipq_query_ipapi(ip)
+                if extra:
+                    info["risk_score"] = int(extra["risk_score"]) if isinstance(extra.get("risk_score"), (int, float)) else None
+                    if info.get("risk_score") is None:
+                        info.pop("risk_score")
+                    for src_key, dst in (
+                        ("is_datacenter", "is_datacenter"),
+                        ("is_vpn", "is_vpn"),
+                        ("is_proxy", "is_proxy_ipapis"),
+                        ("is_tor", "is_tor"),
+                        ("is_abuser", "is_abuser"),
+                    ):
+                        if extra.get(src_key):
+                            info[dst] = True
+                    if extra.get("company"):
+                        info["company"] = str(extra["company"].get("name") or "")[:60]
+                    if extra.get("asn"):
+                        info["asn_org"] = str(extra["asn"].get("org") or "")[:60]
+                if info.get("query") or info:
+                    info["query"] = ip
+                    info["ts"] = now
+                    ips_cache[ip] = info
             fresh = {}
             for node, ip in node_ip.items():
-                info = infos.get(ip)
-                if not info:
+                info = ips_cache.get(ip)
+                if not isinstance(info, dict) or not info.get("query"):
                     continue
                 score, kind = ipq_score(info)
                 fresh[node] = {
                     "ip": ip,
                     "score": score,
                     "kind": kind,
-                    "isp": str(info.get("isp") or "")[:60],
+                    "isp": str(info.get("isp") or info.get("company") or info.get("asn_org") or "")[:60],
                     "as": str(info.get("as") or "")[:40],
                     "country": str(info.get("country") or ""),
                     "city": str(info.get("city") or "")[:40],
-                    "proxy": bool(info.get("proxy")),
-                    "hosting": bool(info.get("hosting")),
+                    "proxy": bool(info.get("proxy") or info.get("is_proxy_ipapis") or info.get("is_vpn") or info.get("is_tor")),
+                    "hosting": bool(info.get("hosting") or info.get("is_datacenter")),
                     "mobile": bool(info.get("mobile")),
+                    "risk": info.get("risk_score"),
+                    "risk_label": ipq_risk_label(info.get("risk_score")),
                     "ts": now,
                 }
             if fresh:
                 self.node_quality = fresh
+                self._ipq_cache["ips"] = {k: v for k, v in ips_cache.items() if now - float(v.get("ts") or 0) <= IPQ_TTL * 7}
                 self._save_ipq()
             good = sum(1 for q in fresh.values() if q["score"] >= 80)
-            self.log("ipq: checked %d/%d ports, >=80: %d, avg %d" % (len(fresh), len(ports), good, (sum(q["score"] for q in fresh.values()) // len(fresh)) if fresh else 0))
-            return {"checked": len(fresh), "ports": len(ports)}
+            avg = (sum(q["score"] for q in fresh.values()) // len(fresh)) if fresh else 0
+            self.log(
+                "ipq: checked %d/%d ports (new %d), >=80: %d, avg %d"
+                % (len(fresh), len(ports), len(pending), good, avg)
+            )
+            return {"checked": len(fresh), "ports": len(ports), "new": len(pending)}
 
     def _qkey(self, name):
         return (-self._qscore(name), self.last_delays.get(name) if isinstance(self.last_delays.get(name), int) else 9999)
@@ -680,6 +752,8 @@ class Pool:
                 clean["auto_test_s"] = val
             if "ipq_enabled" in patch:
                 clean["ipq_enabled"] = 1 if patch["ipq_enabled"] in (1, True, "1", "true", "on") else 0
+            if "ipq_ipapi_key" in patch:
+                clean["ipq_ipapi_key"] = str(patch["ipq_ipapi_key"] or "").strip()[:80]
             if "keywords" in patch:
                 clean["keywords"] = str(patch["keywords"] or "").strip()
             if "test_url" in patch:
