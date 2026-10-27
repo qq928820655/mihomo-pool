@@ -62,6 +62,7 @@ POOL = mgr_mod.Pool(
     mixed_port=int(ENV.get("MPOOL_LOCAL_PORT") or "7893"),
     vless_port=int(ENV.get("MPOOL_LOCAL_VLESS_PORT") or "17990"),
     cfws_port=int(ENV.get("MPOOL_CFWS_PORT") or "8443"),
+    ipq_port=int(ENV.get("MPOOL_IPQ_PORT") or "7894"),
 )
 
 

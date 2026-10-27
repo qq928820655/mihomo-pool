@@ -23,8 +23,11 @@ import yaml
 GROUP_FIXED = "HUB-FIXED"
 IPQ_TTL = 172800
 GROUP_ROTATE = "HUB-ROTATE"
+IPQ_TTL = 172800
+NODE_IP_TTL = 21600
 GROUP_ASSIGN = "HUB-ASSIGN"
-GROUPS = (GROUP_FIXED, GROUP_ROTATE, GROUP_ASSIGN)
+GROUP_PROBE = "HUB-PROBE"
+GROUPS = (GROUP_FIXED, GROUP_ROTATE, GROUP_ASSIGN, GROUP_PROBE)
 PREFIX = "HUB-"
 PORT_KEYS = ("port", "socks-port", "mixed-port", "redir-port", "tproxy-port")
 GROUP_TYPES = {"Selector", "URLTest", "Fallback", "LoadBalance", "Relay"}
@@ -250,7 +253,7 @@ class DelayCache:
 
 
 class Pool:
-    def __init__(self, root, bin_path, controller_addr, listen_base=17901, listen_max=32, log=None, mixed_port=7893, vless_port=17990, cfws_port=8443, singbox_bin=None, hub_ports=(7890, 7891, 7892)):
+    def __init__(self, root, bin_path, controller_addr, listen_base=17901, listen_max=32, log=None, mixed_port=7893, vless_port=17990, cfws_port=8443, singbox_bin=None, hub_ports=(7890, 7891, 7892), ipq_port=7894):
         self.root = os.path.abspath(root)
         self.bin_path = os.path.abspath(bin_path)
         self.singbox_bin = os.path.abspath(singbox_bin) if singbox_bin else os.path.join(os.path.dirname(os.path.abspath(bin_path)), "sing-box")
@@ -258,6 +261,7 @@ class Pool:
         self.listen_base = int(listen_base)
         self.listen_max = max(1, int(listen_max))
         self.hub_ports = tuple(int(p) for p in hub_ports) or (7890, 7891, 7892)
+        self.ipq_port = int(ipq_port)
         self.log = log or (lambda msg: None)
         self.cfg_dir = os.path.join(self.root, "configs")
         self.hist_dir = os.path.join(self.cfg_dir, "history")
@@ -282,7 +286,7 @@ class Pool:
         self.last_delays = self._load_last_delays()
         self.node_quality = {}
         self._ipq_path = os.path.join(self.runtime_dir, "ipq.json")
-        self._ipq_cache = {"ips": {}}
+        self._ipq_cache = {"ips": {}, "node_ip": {}}
         self._load_ipq()
         self.proc = None
         self.runtime_ok = False
@@ -334,13 +338,24 @@ class Pool:
                 ips = data.get("ips")
                 if isinstance(ips, dict):
                     self._ipq_cache["ips"] = ips
+                nip = data.get("node_ip")
+                if isinstance(nip, dict):
+                    self._ipq_cache["node_ip"] = nip
         except (OSError, ValueError):
             self.node_quality = {}
 
     def _save_ipq(self):
         try:
             with open(self._ipq_path, "w", encoding="utf-8") as fh:
-                json.dump({"nodes": self.node_quality, "ips": self._ipq_cache.get("ips", {})}, fh, ensure_ascii=False)
+                json.dump(
+                    {
+                        "nodes": self.node_quality,
+                        "ips": self._ipq_cache.get("ips", {}),
+                        "node_ip": self._ipq_cache.get("node_ip", {}),
+                    },
+                    fh,
+                    ensure_ascii=False,
+                )
         except OSError:
             pass
 
@@ -433,20 +448,41 @@ class Pool:
         except Exception:
             return None
 
+    def _exit_ip_via_probe(self, node):
+        """把 HUB-PROBE 组切到目标节点，经共享探测口（仅 127.0.0.1）量出口 IP——无需独享端口。"""
+        try:
+            self.ctrl.select(GROUP_PROBE, node)
+        except ControllerError:
+            return None
+        return self._exit_ip_via_port(self.ipq_port)
+
     def check_ip_quality(self):
         with self._lock:
             if not int(self.settings.get("ipq_enabled") or 0):
                 return {"checked": 0, "skipped": "ipq_enabled=0"}
-            ports = dict(self.port_map)
-            if not ports:
-                return {"checked": 0}
-            node_ip = {}
-            for node, port in ports.items():
-                ip = self._exit_ip_via_port(port)
-                if ip:
-                    node_ip[node] = ip
             ips_cache = self._ipq_cache.setdefault("ips", {})
+            node_ip_cache = self._ipq_cache.setdefault("node_ip", {})
             now = time.time()
+            candidates = [n for n in self.node_list if isinstance(self.last_delays.get(n), int)]
+            ports = dict(self.port_map)
+            node_ip = {}
+            todo = []
+            for node in candidates:
+                ent = node_ip_cache.get(node)
+                if isinstance(ent, dict) and isinstance(ent.get("ip"), str) and now - float(ent.get("ts") or 0) <= NODE_IP_TTL:
+                    node_ip[node] = ent["ip"]
+                else:
+                    todo.append(node)
+            probed = 0
+            for node in todo:
+                port = ports.get(node)
+                ip = self._exit_ip_via_port(port) if port else self._exit_ip_via_probe(node)
+                if ip:
+                    probed += 1
+                    node_ip[node] = ip
+                    node_ip_cache[node] = {"ip": ip, "ts": now}
+            if not node_ip:
+                return {"checked": 0}
             uniq = sorted(set(node_ip.values()))
             pending = [ip for ip in uniq if not isinstance(ips_cache.get(ip), dict) or now - float(ips_cache[ip].get("ts") or 0) > IPQ_TTL]
             infos = self._ipq_query(pending) if pending else {}
@@ -518,14 +554,15 @@ class Pool:
             if fresh:
                 self.node_quality = fresh
                 self._ipq_cache["ips"] = {k: v for k, v in ips_cache.items() if now - float(v.get("ts") or 0) <= IPQ_TTL * 7}
+                self._ipq_cache["node_ip"] = {k: v for k, v in node_ip_cache.items() if now - float(v.get("ts") or 0) <= NODE_IP_TTL * 4}
                 self._save_ipq()
             good = sum(1 for q in fresh.values() if q["score"] >= 80)
             avg = (sum(q["score"] for q in fresh.values()) // len(fresh)) if fresh else 0
             self.log(
-                "ipq: checked %d/%d ports (new %d), >=80: %d, avg %d"
-                % (len(fresh), len(ports), len(pending), good, avg)
+                "ipq: checked %d/%d nodes (probed %d, new %d), >=80: %d, avg %d"
+                % (len(fresh), len(candidates), probed, len(pending), good, avg)
             )
-            return {"checked": len(fresh), "ports": len(ports), "new": len(pending)}
+            return {"checked": len(fresh), "ports": len(ports), "probed": probed, "new": len(pending)}
 
     def _qkey(self, name):
         return (-self._qscore(name), self.last_delays.get(name) if isinstance(self.last_delays.get(name), int) else 9999)
@@ -901,6 +938,8 @@ class Pool:
         return [
             {"name": "HUB-IN-%d" % p, "type": "mixed", "port": p, "proxy": g}
             for p, g in zip(self.hub_ports, (GROUP_FIXED, GROUP_ROTATE, GROUP_ASSIGN))
+        ] + [
+            {"name": "HUB-IN-PROBE", "type": "mixed", "port": self.ipq_port, "proxy": GROUP_PROBE, "listen": "127.0.0.1"},
         ]
 
     def _phase1_doc(self, doc):

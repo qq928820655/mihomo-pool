@@ -66,6 +66,7 @@ class TestInject(unittest.TestCase):
         p.secret = "sec"
         p.settings = dict(m.DEFAULT_SETTINGS)
         p.hub_ports = (7890, 7891, 7892)
+        p.ipq_port = 7894
         p.last_delays = {}
         p.node_quality = {}
         p.local = {"uuid": "u-1", "path": "/ws-x", "mixed_port": 7893, "vless_port": 17990, "cfws_port": 8443, "cf_base": "example.live"}
@@ -238,6 +239,57 @@ class TestInject(unittest.TestCase):
         s, kind = m.ipq_score({"hosting": True, "isp": "Some VPS Ltd"})
         self.assertEqual((s, kind), (50, "机房"))
         self.assertEqual(m.ipq_score({}), (100, "住宅"))
+
+    def test_probe_listener(self):
+        p = TestInject._fake_pool(self)
+        by_name = {l["name"]: l for l in p._hub_listeners()}
+        self.assertEqual(by_name["HUB-IN-PROBE"]["port"], 7894)
+        self.assertEqual(by_name["HUB-IN-PROBE"]["proxy"], m.GROUP_PROBE)
+        self.assertEqual(by_name["HUB-IN-PROBE"]["listen"], "127.0.0.1")
+        self.assertNotIn("listen", by_name["HUB-IN-7890"])
+
+    def test_ipq_probe_without_port(self):
+        import threading as _th
+        with tempfile.TemporaryDirectory() as d:
+            p = TestInject._fake_pool(self)
+            p.settings["ipq_enabled"] = 1
+            p._lock = _th.RLock()
+            p.node_list = ["port-a", "grp-b", "dead-c"]
+            p.last_delays = {"port-a": 50, "grp-b": 80, "dead-c": "x"}
+            p.port_map = {"port-a": 17901}
+            p._ipq_path = os.path.join(d, "ipq.json")
+            p._ipq_cache = {"ips": {}, "node_ip": {}}
+            selects = []
+
+            class FakeCtrl:
+                def select(self, group, name):
+                    selects.append((group, name))
+
+            p.ctrl = FakeCtrl()
+            pips = {"17901": "1.1.1.1", "7894": "2.2.2.2"}
+            p._exit_ip_via_port = lambda port: pips.get(str(port))
+            p._ipq_query = lambda ips: {ip: {"query": ip, "isp": "Residential ISP %s" % ip[-1]} for ip in ips}
+            p._ipq_query_ipapi = lambda ip: None
+            p._ipq_query_proxycheck = lambda ip: None
+            p._ipq_query_sfs = lambda ip: None
+            res = p.check_ip_quality()
+            self.assertEqual(res["checked"], 2)
+            self.assertEqual(res["probed"], 2)
+            self.assertEqual(selects, [(m.GROUP_PROBE, "grp-b")])
+            self.assertEqual(p.node_quality["port-a"]["ip"], "1.1.1.1")
+            self.assertEqual(p.node_quality["grp-b"]["ip"], "2.2.2.2")
+            self.assertNotIn("dead-c", p.node_quality)
+            selects.clear()
+            res2 = p.check_ip_quality()
+            self.assertEqual((res2["checked"], res2["probed"]), (2, 0))
+            self.assertEqual(selects, [])
+            self.assertEqual(p._ipq_cache["node_ip"]["grp-b"]["ip"], "2.2.2.2")
+            p2 = TestInject._fake_pool(self)
+            p2._ipq_path = p._ipq_path
+            p2._ipq_cache = {"ips": {}, "node_ip": {}}
+            p2.node_quality = {}
+            p2._load_ipq()
+            self.assertEqual(p2._ipq_cache["node_ip"]["grp-b"]["ip"], "2.2.2.2")
 
     def test_port_order_quality_first(self):
         p = TestInject._fake_pool(self)

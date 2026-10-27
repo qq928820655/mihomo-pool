@@ -14,6 +14,7 @@
 | 7893 | **本地直连 HTTP/SOCKS5**（无认证，出口=本机 DIRECT），`MPOOL_LOCAL_PORT` 可改 |
 | 17990 | **本地直连 vmess 节点**（UUID 认证，出口=本机 DIRECT），给 clash 客户端当节点用，`MPOOL_LOCAL_VLESS_PORT` 可改 |
 | 9090 | mihomo external-controller（仅 127.0.0.1，随机 secret，位于 `runtime/secret`） |
+| 7894 | 纯度探测口（**仅 127.0.0.1**，`MPOOL_IPQ_PORT` 可改）：配合内部 HUB-PROBE 组逐节点探测出口 IP，外部请勿依赖 |
 
 7890/7891/7892 均为 mixed 端口（HTTP + SOCKS5 皆可），出站被固定钉在对应选择组，不走规则。三个 Hub 端口可在 `.env` 用 `MPOOL_HUB_PORTS=7890,7891,7892` 整体自定义（改后重启服务生效）。
 
@@ -87,7 +88,7 @@ POST /api/v1/history/restore {"file":"..."}      恢复历史版本
 | StopForumSpam | 滥用出现次数 ×25 扣分 |
 | **ASN/ISP 关键词** | ISP/ORG/ASN 文本命中托管/VPN 关键词（hosting/vps/vpn/cloud/机房/云…）-15 |
 
-纯度 = 可用源的均值；分配优先级 = 纯度降序 → 同分延迟升序（端口补给、三个 Hub 组默认选中都按此排序）。列表默认可用优先，超时垫底；悬浮 ISP 可看命中关键词。
+纯度 = 可用源的均值；**探测经内部 HUB-PROBE 组 + 共享探测口逐节点进行，节点不需要独享端口**——所有测速可达的节点（不只端口池内的）都有纯度分；出口 IP 映射缓存 6h，之后才重新探测。分配优先级 = 纯度降序 → 同分延迟升序（端口补给、三个 Hub 组默认选中都按此排序）。列表默认可用优先，超时垫底；悬浮 ISP 可看命中关键词。
 
 ## 与 Hub / CPA 对接
 
