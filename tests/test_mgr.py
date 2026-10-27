@@ -226,6 +226,19 @@ class TestInject(unittest.TestCase):
         self.assertEqual(m.ipq_risk_label(40), "中风险")
         self.assertEqual(m.ipq_risk_label(39), "低风险")
 
+    def test_ipq_asn_keyword(self):
+        # vpngate-clean-mihomo 口径：ASN/ISP 文本命中托管/VPN 关键词 → -15
+        self.assertEqual(m.ipq_asn_kw({"as": "AS9848 Yancy Limited"}), [])
+        self.assertEqual(m.ipq_asn_kw({"as": "AS16509 Amazon Cloud"}), ["cloud"])
+        self.assertEqual(m.ipq_asn_kw({"isp": "OVH SAS"}), ["ovh"])
+        self.assertEqual(m.ipq_asn_kw({"isp": "阿里云"}), ["云"])
+        self.assertEqual(m.ipq_asn_kw({"company": {"name": "Hetzner Online"}}), ["hetzner"])
+        s, kind = m.ipq_score({"as": "AS14061 DigitalOcean"})
+        self.assertEqual((s, kind), (85, "住宅"))
+        s, kind = m.ipq_score({"hosting": True, "isp": "Some VPS Ltd"})
+        self.assertEqual((s, kind), (50, "机房"))
+        self.assertEqual(m.ipq_score({}), (100, "住宅"))
+
     def test_port_order_quality_first(self):
         p = TestInject._fake_pool(self)
         p.last_delays = {"dirty-fast": 50, "clean-slow": 300}

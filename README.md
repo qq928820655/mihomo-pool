@@ -75,6 +75,20 @@ POST /api/v1/history/restore {"file":"..."}      恢复历史版本
 - **自动测速**：`auto_test_s`（默认 300s，0=关）——服务器后台线程定时测全部节点并更新缓存，7891/7892/pick 自动避开超时节点；**与网页无关，关掉浏览器照常运行**（概览页可看上次结果）。节点列表里「未测」=本轮还没测过，「超时」=测了但没通过。
 - **面板 Token**：只用于打开面板/API 鉴权，输入一次自动存浏览器 localStorage（输入框掩码显示），刷新/重开不用再输。
 
+## IP 纯度评分
+
+自动测速后对有端口的节点探测出口 IP，四源交叉打 0–100 纯度分（`ipq_enabled` 默认开，结果缓存 48h）：
+
+| 源 | 判定 |
+|---|---|
+| ip-api（批量） | 机房 -35 / 代理 -25 / 移动 +5 |
+| ipapi.is | 100-risk_score，机房/VPN/代理/Tor/滥用再 -15（风险分需 `ipq_ipapi_key`） |
+| proxycheck.io | 100-risk，type 为 VPN/SOCKS/Proxy/Hosting 再 -15 |
+| StopForumSpam | 滥用出现次数 ×25 扣分 |
+| **ASN/ISP 关键词** | ISP/ORG/ASN 文本命中托管/VPN 关键词（hosting/vps/vpn/cloud/机房/云…）-15 |
+
+纯度 = 可用源的均值；分配优先级 = 纯度降序 → 同分延迟升序（端口补给、三个 Hub 组默认选中都按此排序）。列表默认可用优先，超时垫底；悬浮 ISP 可看命中关键词。
+
 ## 与 Hub / CPA 对接
 
 - Hub（8788）的「自动发现 mihomo 端口」默认扫 `cli-proxy-mihomo:17901-17910`；本机部署时给 hub 加 `WB_PROXY_DISCOVER_HOST=127.0.0.1`（重启 hub 生效），即可发现前 10 个逐节点端口，配合出口延迟门禁（握手 ≤300ms 可勾选）与「每槽账号数」自动分配。

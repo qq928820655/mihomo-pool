@@ -45,9 +45,31 @@ DEFAULT_SETTINGS = {
 }
 
 
+_IPQ_KW = (
+    "hosting", "datacenter", "data center", "vps", "vpn", "cloud",
+    "dedicated", "server", "colo", "机房", "数据中心", "托管", "云",
+    "digitalocean", "ovh", "hetzner", "linode", "vultr", "leaseweb", "contabo",
+)
+
+
+def ipq_asn_kw(info):
+    texts = []
+    for k in ("as", "isp", "org", "asn_org", "company"):
+        v = info.get(k)
+        if isinstance(v, str):
+            texts.append(v)
+        elif k == "company" and isinstance(v, dict):
+            texts.append(str(v.get("name") or ""))
+    blob = " ".join(texts).lower()
+    return sorted({kw for kw in _IPQ_KW if kw in blob})
+
+
 def ipq_score(info):
     parts = []
     s1 = 100
+    kw_hit = bool(ipq_asn_kw(info))
+    if kw_hit:
+        s1 -= 15
     if info.get("hosting"):
         s1 -= 35
     if info.get("proxy"):
@@ -490,6 +512,7 @@ class Pool:
                     "pc_risk": info.get("pc_risk"),
                     "pc_type": info.get("pc_type"),
                     "sfs_appears": info.get("sfs_appears"),
+                    "kw": ipq_asn_kw(info),
                     "ts": now,
                 }
             if fresh:

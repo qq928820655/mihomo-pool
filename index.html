@@ -234,7 +234,7 @@ let NSORT={k:'',dir:1};
 function qcell(q){
   if(!q)return '<span class="muted">—</span>';
   const c=q.score>=80?'d-ok':(q.score>=50?'warn':'d-bad');
-  return `<span class="${c}" title="${esc(q.kind+' · '+(q.isp||'')+' · '+(q.country||'')+' '+(q.city||''))}">${q.score}</span> <span class="muted" style="font-size:11px">${esc(q.kind)}</span>`;
+  return `<span class="${c}" title="${esc(q.kind+' · '+(q.isp||'')+' · '+(q.country||'')+' '+(q.city||'')+((q.kw&&q.kw.length)?(' · 命中:'+q.kw.join(',')):''))}">${q.score}</span> <span class="muted" style="font-size:11px">${esc(q.kind)}</span>`;
 }
 function setSort(k){
   if(NSORT.k===k)NSORT.dir=-NSORT.dir;else{NSORT.k=k;NSORT.dir=1}
