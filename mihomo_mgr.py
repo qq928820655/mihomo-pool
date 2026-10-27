@@ -4,6 +4,7 @@
 7890 固定出口 / 7891 定时随机轮换 / 7892 API 粘性分配 / 17901+ 逐节点直连端口。
 """
 import hashlib
+import traceback
 import json
 import os
 import random
@@ -59,10 +60,18 @@ def ipq_score(info):
         if info.get("is_datacenter") or info.get("is_vpn") or info.get("is_proxy") or info.get("is_tor") or info.get("is_abuser"):
             s2 -= 15
         parts.append(max(0, min(100, s2)))
+    if isinstance(info.get("pc_risk"), int):
+        s3 = 100 - int(info["pc_risk"])
+        if str(info.get("pc_type") or "").lower() in ("vpn", "socks", "proxy", "hosting"):
+            s3 -= 15
+        parts.append(max(0, min(100, s3)))
+    if isinstance(info.get("sfs_appears"), int):
+        s4 = 100 - int(info["sfs_appears"]) * 25
+        parts.append(max(0, min(100, s4)))
     score = int(round(sum(parts) / len(parts)))
-    if info.get("proxy"):
+    if info.get("proxy") or str(info.get("pc_type") or "").lower() in ("vpn", "socks", "proxy"):
         kind = "代理"
-    elif info.get("hosting"):
+    elif info.get("hosting") or str(info.get("pc_type") or "").lower() == "hosting":
         kind = "机房"
     else:
         kind = "住宅"
@@ -349,6 +358,8 @@ class Pool:
             rows = json.loads(resp.read().decode("utf-8", "replace"))
         out = {}
         for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
             ip = str(row.get("query") or "")
             if ip:
                 out[ip] = row
@@ -366,6 +377,37 @@ class Pool:
             if not isinstance(data, dict) or data.get("is_bogon"):
                 return None
             return data
+        except Exception:
+            return None
+
+    def _ipq_query_proxycheck(self, ip):
+        try:
+            req = urllib.request.Request(
+                "https://proxycheck.io/v2/%s?vpn=1&asn=1&risk=1" % urllib.parse.quote(ip),
+                headers={"User-Agent": "mihomo-pool"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            row = data.get(ip) if isinstance(data, dict) else None
+            if not isinstance(row, dict):
+                return None
+            return {"type": str(row.get("type") or ""), "risk": row.get("risk"), "isp": str(row.get("isp") or "")}
+        except Exception:
+            return None
+
+    def _ipq_query_sfs(self, ip):
+        try:
+            req = urllib.request.Request(
+                "https://api.stopforumspam.org/api?ip=%s&json" % urllib.parse.quote(ip),
+                headers={"User-Agent": "mihomo-pool"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            row = data.get("ip") if isinstance(data, dict) else None
+            if not isinstance(row, dict):
+                return None
+            appears = row.get("appears")
+            return int(appears) if isinstance(appears, (int, float)) else 0
         except Exception:
             return None
 
@@ -396,16 +438,32 @@ class Pool:
                     for src_key, dst in (
                         ("is_datacenter", "is_datacenter"),
                         ("is_vpn", "is_vpn"),
-                        ("is_proxy", "is_proxy_ipapis"),
+                        ("is_proxy", "is_proxy_ipapi"),
                         ("is_tor", "is_tor"),
                         ("is_abuser", "is_abuser"),
                     ):
                         if extra.get(src_key):
                             info[dst] = True
-                    if extra.get("company"):
+                    if isinstance(extra.get("company"), dict):
                         info["company"] = str(extra["company"].get("name") or "")[:60]
-                    if extra.get("asn"):
+                    elif isinstance(extra.get("company"), str) and extra["company"]:
+                        info["company"] = extra["company"][:60]
+                    if isinstance(extra.get("asn"), dict):
                         info["asn_org"] = str(extra["asn"].get("org") or "")[:60]
+                    elif isinstance(extra.get("asn"), str) and extra["asn"]:
+                        info["asn_org"] = extra["asn"][:60]
+                pc = self._ipq_query_proxycheck(ip)
+                if pc:
+                    info["pc_risk"] = int(pc["risk"]) if isinstance(pc.get("risk"), (int, float)) else None
+                    if info.get("pc_risk") is None:
+                        info.pop("pc_risk")
+                    if pc.get("type"):
+                        info["pc_type"] = str(pc["type"])[:20]
+                    if pc.get("isp") and not info.get("isp"):
+                        info["isp"] = str(pc["isp"])[:60]
+                sfs = self._ipq_query_sfs(ip)
+                if sfs is not None:
+                    info["sfs_appears"] = int(sfs)
                 if info.get("query") or info:
                     info["query"] = ip
                     info["ts"] = now
@@ -429,6 +487,9 @@ class Pool:
                     "mobile": bool(info.get("mobile")),
                     "risk": info.get("risk_score"),
                     "risk_label": ipq_risk_label(info.get("risk_score")),
+                    "pc_risk": info.get("pc_risk"),
+                    "pc_type": info.get("pc_type"),
+                    "sfs_appears": info.get("sfs_appears"),
                     "ts": now,
                 }
             if fresh:
@@ -1007,7 +1068,8 @@ class Pool:
                 try:
                     self.check_ip_quality()
                 except Exception as exc:
-                    self.log("ipq error: %s" % exc)
+                    tb = traceback.format_exc().strip().splitlines()
+                    self.log("ipq error: %s | %s" % (exc, " § ".join(tb[-4:])))
             self._remap_ports_to_alive(reachable)
             return {n: res[n] for n in self.node_list if n in res}
 

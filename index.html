@@ -260,11 +260,23 @@ async function loadNodes(){
     rows=[...rows].sort((a,b)=>{
       const x=a[NSORT.k],y=b[NSORT.k];
       if(NSORT.k==='name'||NSORT.k==='type')return NSORT.dir*String(x||'').localeCompare(String(y||''));
-      if(NSORT.k==='qscore'){const a=(n.quality?n.quality.score:-1),b2=(b.quality?b.quality.score:-1);return NSORT.dir*(b2-a)}
+      if(NSORT.k==='qscore'){const qa=(a.quality?a.quality.score:-1),qb=(b.quality?b.quality.score:-1);return NSORT.dir*(qb-qa)}
       if(NSORT.k==='match')return NSORT.dir*((x?1:0)-(y?1:0));
       if(x==null)return 1;
       if(y==null)return -1;
       return NSORT.dir*(x-y);
+    });
+  }else{
+    const rank=n=>typeof n.delay_ms==='number'?0:(n.tested?2:1);
+    rows=[...rows].sort((a,b)=>{
+      const ra=rank(a),rb=rank(b);
+      if(ra!==rb)return ra-rb;
+      if(ra===0){
+        const qa=a.quality?a.quality.score:60,qb=b.quality?b.quality.score:60;
+        if(qb!==qa)return qb-qa;
+        return a.delay_ms-b.delay_ms;
+      }
+      return String(a.name||'').localeCompare(String(b.name||''));
     });
   }
   renderNodesHead();

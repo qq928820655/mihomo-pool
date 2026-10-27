@@ -247,6 +247,14 @@ class TestInject(unittest.TestCase):
             self.assertEqual(p.update_settings({"ipq_enabled": True})["ipq_enabled"], 1)
             self.assertEqual(p.update_settings({"ipq_enabled": "0"})["ipq_enabled"], 0)
 
+    def test_ipq_score_multi_source(self):
+        self.assertEqual(m.ipq_score({"pc_risk": 20}), (90, "住宅"))
+        s, kind = m.ipq_score({"pc_risk": 60, "pc_type": "VPN"})
+        self.assertEqual((s, kind), (62, "代理"))
+        self.assertEqual(m.ipq_score({"sfs_appears": 2}), (75, "住宅"))
+        s, kind = m.ipq_score({"pc_type": "Hosting"})
+        self.assertEqual(kind, "机房")
+
     def test_local_node_yaml(self):
         import yaml as _yaml
         p = self._fake_pool()
