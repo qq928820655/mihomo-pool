@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import tempfile
 import unittest
 
@@ -665,6 +666,68 @@ class TestSettings(unittest.TestCase):
             q._load_settings()
             self.assertEqual(q.settings["keywords"], "香港")
             self.assertIsInstance(json.load(open(p.settings_path)), dict)
+
+
+class TestSetHubNode(unittest.TestCase):
+    """手动把某个共享出口端口指到指定节点。"""
+
+    def _pool(self, nodes=("a", "b"), fail=False):
+        p = m.Pool.__new__(m.Pool)
+        p.hub_ports = (7890, 7891, 7892)
+        p.node_list = list(nodes)
+        p.settings = dict(m.DEFAULT_SETTINGS)
+        p.log = lambda s: None
+        p.save_settings = lambda: None
+        p._lock = threading.RLock()
+        p.calls = []
+
+        class Ctrl:
+            def select(self, group, node):
+                if fail:
+                    raise m.ControllerError("boom")
+                p.calls.append((group, node))
+
+        p.ctrl = Ctrl()
+        return p
+
+    def test_each_shared_port_maps_to_its_group(self):
+        p = self._pool()
+        self.assertEqual(p.set_hub_node(7890, "a")["group"], "HUB-FIXED")
+        self.assertEqual(p.set_hub_node(7891, "b")["group"], "HUB-ROTATE")
+        self.assertEqual(p.set_hub_node(7892, "a")["group"], "HUB-ASSIGN")
+        self.assertEqual(p.calls, [("HUB-FIXED", "a"), ("HUB-ROTATE", "b"),
+                                   ("HUB-ASSIGN", "a")])
+
+    def test_fixed_port_remembers_the_choice_for_reload(self):
+        p = self._pool()
+        p.set_hub_node(7890, "b")
+        self.assertEqual(p.settings["fixed_node"], "b")
+
+    def test_rotating_port_does_not_persist_a_default(self):
+        p = self._pool()
+        p.set_hub_node(7891, "b")
+        self.assertEqual(p.settings["fixed_node"], "")
+
+    def test_unknown_node_is_rejected(self):
+        p = self._pool()
+        with self.assertRaises(m.PoolError):
+            p.set_hub_node(7890, "nope")
+
+    def test_port_outside_the_hub_set_is_rejected(self):
+        p = self._pool()
+        with self.assertRaises(m.PoolError):
+            p.set_hub_node(17901, "a")
+        with self.assertRaises(m.PoolError):
+            p.set_hub_node("x", "a")
+
+    def test_controller_error_propagates(self):
+        p = self._pool(fail=True)
+        with self.assertRaises(m.ControllerError):
+            p.set_hub_node(7890, "a")
+
+    def test_port_may_arrive_as_a_string(self):
+        p = self._pool()
+        self.assertEqual(p.set_hub_node("7892", "b")["port"], 7892)
 
 
 class TestHubExits(unittest.TestCase):

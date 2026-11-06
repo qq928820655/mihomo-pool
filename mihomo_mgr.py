@@ -1367,6 +1367,40 @@ class Pool:
             self.log("fixed exit -> %s" % node)
             return node
 
+    def hub_groups(self):
+        """[(port, group)] for the shared hub ports, in configured order."""
+        return list(zip(self.hub_ports,
+                        (GROUP_FIXED, GROUP_ROTATE, GROUP_ASSIGN)))
+
+    def set_hub_node(self, port, node):
+        """Point one shared hub port at a specific node, right now.
+
+        The three hub ports are the only exits the gateway consumes, but until
+        now only 7890 could be steered by hand: 7891 followed the timer and
+        7892 followed the key hash, so an operator who wanted "this port on
+        that node" had no lever. Selecting the group directly is exactly what
+        the rotation timer does, so a manual pick is simply overridden on the
+        next rotation for 7891 — that is the documented behavior of a rotating
+        exit, not a bug. 7890 and 7892 keep the pick until something else
+        moves them.
+        """
+        with self._lock:
+            if node not in self.node_list:
+                raise PoolError("未知节点: %s" % node)
+            mapping = dict(self.hub_groups())
+            try:
+                group = mapping[int(port)]
+            except (KeyError, TypeError, ValueError):
+                raise PoolError("不是共享出口端口: %r（可用 %s）"
+                                % (port, sorted(mapping))) from None
+            self.ctrl.select(group, node)
+            if group == GROUP_FIXED:
+                # Keep the stored default in step: a reload re-applies it.
+                self.settings["fixed_node"] = node
+                self.save_settings()
+            self.log("hub port %s (%s) -> %s" % (port, group, node))
+            return {"port": int(port), "group": group, "node": node}
+
     def assign(self, key, keywords=""):
         with self._lock:
             cands = self.gate(keywords)
@@ -1421,10 +1455,11 @@ class Pool:
         auto-fallback. This mapping is what lets the hub show the operator the
         real node name instead of the slot alias.
         """
-        pairs = list(zip(self.hub_ports, (GROUP_FIXED, GROUP_ROTATE, GROUP_ASSIGN)))
+        pairs = self.hub_groups()
         out = []
         for port, group in pairs:
-            entry = {"port": int(port), "group": group, "node": "", "error": ""}
+            entry = {"port": int(port), "group": group, "node": "", "error": "",
+                     "rotating": group == GROUP_ROTATE}
             if not self.runtime_ok:
                 entry["error"] = "runtime not ready"
                 out.append(entry)

@@ -370,6 +370,10 @@ class Handler(BaseHTTPRequestHandler):
             body = self._json_body()
             node = POOL.set_fixed(str(body.get("node") or ""))
             return self._json(200, {"ok": True, "node": node})
+        if path == "/api/v1/hub-node":
+            body = self._json_body()
+            res = POOL.set_hub_node(body.get("port"), str(body.get("node") or ""))
+            return self._json(200, {"ok": True, **res})
         if path == "/api/v1/settings":
             body = self._json_body()
             settings = POOL.update_settings(body)

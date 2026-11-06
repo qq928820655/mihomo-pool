@@ -28,6 +28,11 @@ class FakePool:
         return [{"port": 7890, "group": "HUB-FIXED", "node": "a", "error": ""},
                 {"port": 7891, "group": "HUB-ROTATE", "node": "b", "error": ""}]
 
+    def set_hub_node(self, port, node):
+        if node not in self.node_list:
+            raise m.PoolError("未知节点: %s" % node)
+        return {"port": int(port), "group": "HUB-FIXED", "node": node}
+
     def pick(self, keywords="", max_ms=None, key=None):
         if keywords == "nowhere":
             raise m.PoolError("门限内没有可用出口")
@@ -122,6 +127,19 @@ class TestApi(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual([e["port"] for e in data["exits"]], [7890, 7891])
         self.assertEqual([e["node"] for e in data["exits"]], ["a", "b"])
+
+    def test_hub_node_sets_a_shared_port(self):
+        code, data = self.req("/api/v1/hub-node", "POST",
+                              json.dumps({"port": 7890, "node": "b"}))
+        self.assertEqual(code, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual((data["port"], data["node"]), (7890, "b"))
+
+    def test_hub_node_rejects_an_unknown_node(self):
+        code, data = self.req("/api/v1/hub-node", "POST",
+                              json.dumps({"port": 7890, "node": "nope"}))
+        self.assertEqual(code, 409)
+        self.assertIn("未知节点", data["error"])
 
     def test_pick_with_key_is_sticky_7892(self):
         code, data = self.req("/api/v1/pick?key=acc")

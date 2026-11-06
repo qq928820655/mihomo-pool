@@ -22,6 +22,8 @@ main{padding:18px 20px;max-width:1180px;margin:0 auto}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
 .card .k{color:var(--dim);font-size:12px}.card .v{font-size:19px;font-weight:600;margin-top:2px;word-break:break-all}
 .card .v.small{font-size:13px;font-weight:400}
+.card .pick{margin-top:6px}
+.card .pick select{width:100%;padding:4px 6px;font-size:12px;background:var(--panel2);color:inherit;border:1px solid var(--line);border-radius:6px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
 button.btn{background:var(--acc);color:#fff;border:none;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px}
 button.btn.gray{background:var(--panel2);border:1px solid var(--line);color:var(--fg)}
@@ -66,9 +68,9 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
     <div class="cards">
       <div class="card"><div class="k">运行状态</div><div class="v" id="c-run">—</div></div>
       <div class="card"><div class="k">节点数 / 已映射端口</div><div class="v" id="c-nodes">—</div></div>
-      <div class="card"><div class="k" id="t-fixed">固定出口</div><div class="v small" id="c-fixed">—</div></div>
-      <div class="card"><div class="k" id="t-rotate">轮换出口</div><div class="v small" id="c-rotate">—</div></div>
-      <div class="card"><div class="k" id="t-assign">分配出口</div><div class="v small" id="c-assign">—</div></div>
+      <div class="card"><div class="k" id="t-fixed">固定出口</div><div class="v small" id="c-fixed">—</div><div class="pick"><select id="pick-0" onchange="pickHubNode(0,this)"></select></div></div>
+      <div class="card"><div class="k" id="t-rotate">轮换出口</div><div class="v small" id="c-rotate">—</div><div class="pick"><select id="pick-1" onchange="pickHubNode(1,this)"></select></div><div class="hint" style="font-size:11px;margin-top:4px">定时轮换会覆盖手动选择</div></div>
+      <div class="card"><div class="k" id="t-assign">分配出口</div><div class="v small" id="c-assign">—</div><div class="pick"><select id="pick-2" onchange="pickHubNode(2,this)"></select></div></div>
       <div class="card"><div class="k">门限内可用（缓存）</div><div class="v" id="c-fresh">—</div></div>
       <div class="card"><div class="k">后台自动测速</div><div class="v small" id="c-auto">—</div></div>
     </div>
@@ -227,6 +229,7 @@ async function refresh(){
     $('#src-err').textContent=s.last_error||'';
     const st=await api('/api/v1/settings');const x=st.settings;
     $('#s-nname').value=x.node_name||'';$('#s-max').value=x.max_ms;$('#s-int').value=x.interval_s;$('#s-kw').value=x.keywords;$('#s-ttl').value=x.ttl_s;$('#s-url').value=x.test_url;$('#s-auto').value=x.auto_test_s;$('#s-ipq').value=String(x.ipq_enabled??1);
+    fillHubPickers();
     buildApi();
   }catch(e){toast('加载失败: '+e.message,1)}
 }
@@ -292,6 +295,34 @@ async function loadNodes(){
 async function setFixed(btn){
   try{const d=await api('/api/v1/fixed',{method:'POST',body:JSON.stringify({node:btn.dataset.n})});toast('固定出口 → '+d.node);refresh()}catch(e){toast(e.message,1)}
 }
+// 三个共享出口端口的节点选择器。端口来自 status.hub_ports，节点来自节点表，
+// 所以订阅换了、端口改了都不用改前端。
+async function fillHubPickers(){
+  const hp=Array.isArray(STATUS.hub_ports)&&STATUS.hub_ports.length===3?STATUS.hub_ports:[7890,7891,7892];
+  const now=[STATUS.fixed_now,STATUS.rotate_now,STATUS.assign_now];
+  let nodes=[];
+  try{const d=await api('/api/v1/nodes');nodes=(d.nodes||[]).map(n=>n.name);}catch(e){}
+  hp.forEach((port,i)=>{
+    const sel=$('#pick-'+i);if(!sel)return;
+    const cur=now[i]||'';
+    sel.innerHTML=['<option value="">（未选 / 跟随默认）</option>']
+      .concat(nodes.map(n=>'<option value="'+esc(n)+'"'+(n===cur?' selected':'')+'>'+esc(n)+'</option>'))
+      .join('');
+    sel.dataset.port=String(port);
+    sel.title='把 '+port+' 切换到指定节点';
+  });
+}
+async function pickHubNode(i,sel){
+  const port=Number(sel.dataset.port||0),node=sel.value;
+  if(!port||!node)return;
+  sel.disabled=true;
+  try{
+    const d=await api('/api/v1/hub-node',{method:'POST',body:JSON.stringify({port,node})});
+    toast(port+' → '+d.node);refresh();
+  }catch(e){toast(e.message,1);sel.value=nowSel(i)}
+  finally{sel.disabled=false}
+}
+function nowSel(i){return [STATUS.fixed_now,STATUS.rotate_now,STATUS.assign_now][i]||''}
 async function pinPort(btn){
   const n=btn.dataset.n;
   const lo=STATUS.listen_base||17901,hi=lo+(STATUS.listen_max||32)-1;
