@@ -25,8 +25,12 @@ class FakePool:
         return [{"name": n, "type": "ss", "delay_ms": 100, "listener_port": 17901, "match": True} for n in self.node_list]
 
     def hub_exits(self):
-        return [{"port": 7890, "group": "HUB-FIXED", "node": "a", "error": ""},
-                {"port": 7891, "group": "HUB-ROTATE", "node": "b", "error": ""}]
+        return [{"port": 7890, "group": "HUB-FIXED", "node": "a", "error": "",
+                 "kind": "shared"},
+                {"port": 7891, "group": "HUB-ROTATE", "node": "b", "error": "",
+                 "kind": "shared"},
+                {"port": 17901, "group": "", "node": "c", "error": "",
+                 "kind": "node"}]
 
     def set_hub_node(self, port, node):
         if node not in self.node_list:
@@ -125,8 +129,8 @@ class TestApi(unittest.TestCase):
         code, data = self.req("/api/v1/hub-exits")
         self.assertEqual(code, 200)
         self.assertTrue(data["ok"])
-        self.assertEqual([e["port"] for e in data["exits"]], [7890, 7891])
-        self.assertEqual([e["node"] for e in data["exits"]], ["a", "b"])
+        self.assertEqual([e["port"] for e in data["exits"]], [7890, 7891, 17901])
+        self.assertEqual([e["node"] for e in data["exits"]], ["a", "b", "c"])
 
     def test_hub_node_sets_a_shared_port(self):
         code, data = self.req("/api/v1/hub-node", "POST",

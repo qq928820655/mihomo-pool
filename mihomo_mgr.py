@@ -1448,18 +1448,24 @@ class Pool:
         return out
 
     def hub_exits(self):
-        """Which node each hub port currently exits through.
+        """Port → node name for every port a hub slot can point at.
 
-        The hub only knows a slot as "the proxy at 127.0.0.1:7890"; the node
-        behind that port is chosen here and can change on rotation or
-        auto-fallback. This mapping is what lets the hub show the operator the
-        real node name instead of the slot alias.
+        Covers both kinds of exit:
+          · the shared hub ports (7890/7891/7892), whose node is the group's
+            current selection and can move on rotation or auto-fallback;
+          · the per-node ports (17901+), each hard-wired to one node by the
+            listener config, so the answer is the node the port is bound to.
+
+        The hub only knows a slot as "the proxy at 127.0.0.1:<port>", so this
+        mapping is what lets it show the real node name instead of the alias.
+        A slot pointed at a per-node port used to come back with no name at
+        all, which read as "unknown exit" even though the port is the most
+        predictable exit there is.
         """
-        pairs = self.hub_groups()
         out = []
-        for port, group in pairs:
+        for port, group in self.hub_groups():
             entry = {"port": int(port), "group": group, "node": "", "error": "",
-                     "rotating": group == GROUP_ROTATE}
+                     "rotating": group == GROUP_ROTATE, "kind": "shared"}
             if not self.runtime_ok:
                 entry["error"] = "runtime not ready"
                 out.append(entry)
@@ -1469,6 +1475,10 @@ class Pool:
             except ControllerError as exc:
                 entry["error"] = str(exc)
             out.append(entry)
+        # Per-node ports: the binding is in port_map, no controller call needed.
+        for node, port in sorted(self.port_map.items(), key=lambda kv: kv[1]):
+            out.append({"port": int(port), "group": "", "node": node,
+                        "error": "", "rotating": False, "kind": "node"})
         return out
 
     def status(self):

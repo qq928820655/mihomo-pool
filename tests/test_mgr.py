@@ -733,10 +733,11 @@ class TestSetHubNode(unittest.TestCase):
 class TestHubExits(unittest.TestCase):
     """端口 → 当前节点名：hub 靠它把槽位别名换成真实出口节点。"""
 
-    def _pool(self, selected=None, runtime_ok=True, raises=None):
+    def _pool(self, selected=None, runtime_ok=True, raises=None, port_map=None):
         p = m.Pool.__new__(m.Pool)
         p.hub_ports = (7890, 7891, 7892)
         p.runtime_ok = runtime_ok
+        p.port_map = dict(port_map or {})
 
         class Ctrl:
             def selected(self, group):
@@ -778,6 +779,33 @@ class TestHubExits(unittest.TestCase):
         exits = p.hub_exits()
         self.assertEqual([e["port"] for e in exits], [18000, 18001])
         self.assertEqual([e["group"] for e in exits], ["HUB-FIXED", "HUB-ROTATE"])
+
+    def test_per_node_ports_are_included_with_their_node(self):
+        """节点专属口也要出现在映射里：槽位指向它时才有名字可显示。"""
+        p = self._pool({"HUB-FIXED": "a"},
+                       port_map={"直连-菲律宾": 17926, "直连-日本": 17902})
+        exits = p.hub_exits()
+        by_port = {e["port"]: e for e in exits}
+        self.assertEqual(by_port[17926]["node"], "直连-菲律宾")
+        self.assertEqual(by_port[17926]["kind"], "node")
+        self.assertEqual(by_port[17902]["node"], "直连-日本")
+        # 共享出口仍然在，且标记为 shared
+        self.assertEqual(by_port[7890]["kind"], "shared")
+
+    def test_per_node_ports_sort_by_port_number(self):
+        p = self._pool(port_map={"c": 17903, "a": 17901, "b": 17902})
+        node_ports = [e["port"] for e in p.hub_exits() if e["kind"] == "node"]
+        self.assertEqual(node_ports, [17901, 17902, 17903])
+
+    def test_runtime_down_still_lists_per_node_ports(self):
+        """运行时未就绪时，节点专属口的绑定是静态的，照样能报出来。"""
+        p = self._pool(runtime_ok=False, port_map={"直连-菲律宾": 17926})
+        exits = p.hub_exits()
+        shared = [e for e in exits if e["kind"] == "shared"]
+        nodes = [e for e in exits if e["kind"] == "node"]
+        self.assertTrue(all(e["error"] for e in shared))
+        self.assertEqual(nodes[0]["node"], "直连-菲律宾")
+        self.assertEqual(nodes[0]["error"], "")
 
 
 if __name__ == "__main__":
