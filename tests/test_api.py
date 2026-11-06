@@ -24,6 +24,10 @@ class FakePool:
     def nodes_view(self, keywords=""):
         return [{"name": n, "type": "ss", "delay_ms": 100, "listener_port": 17901, "match": True} for n in self.node_list]
 
+    def hub_exits(self):
+        return [{"port": 7890, "group": "HUB-FIXED", "node": "a", "error": ""},
+                {"port": 7891, "group": "HUB-ROTATE", "node": "b", "error": ""}]
+
     def pick(self, keywords="", max_ms=None, key=None):
         if keywords == "nowhere":
             raise m.PoolError("门限内没有可用出口")
@@ -111,6 +115,13 @@ class TestApi(unittest.TestCase):
         self.assertEqual(data["node"], "a")
         self.assertFalse(data["sticky"])
         self.assertTrue(data["proxy_url"].endswith(":17901"))
+
+    def test_hub_exits_lists_port_to_node(self):
+        code, data = self.req("/api/v1/hub-exits")
+        self.assertEqual(code, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual([e["port"] for e in data["exits"]], [7890, 7891])
+        self.assertEqual([e["node"] for e in data["exits"]], ["a", "b"])
 
     def test_pick_with_key_is_sticky_7892(self):
         code, data = self.req("/api/v1/pick?key=acc")

@@ -332,6 +332,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/nodes":
             keywords = (query.get("keywords") or [""])[0]
             return self._json(200, {"ok": True, "nodes": POOL.nodes_view(keywords)})
+        if path == "/api/v1/hub-exits":
+            return self._json(200, {"ok": True, "exits": POOL.hub_exits()})
         if path == "/api/v1/pick" or path == "/api/v1/assign":
             keywords = (query.get("keywords") or [""])[0]
             max_ms = (query.get("max_ms") or [""])[0]

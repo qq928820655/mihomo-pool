@@ -1413,6 +1413,29 @@ class Pool:
             )
         return out
 
+    def hub_exits(self):
+        """Which node each hub port currently exits through.
+
+        The hub only knows a slot as "the proxy at 127.0.0.1:7890"; the node
+        behind that port is chosen here and can change on rotation or
+        auto-fallback. This mapping is what lets the hub show the operator the
+        real node name instead of the slot alias.
+        """
+        pairs = list(zip(self.hub_ports, (GROUP_FIXED, GROUP_ROTATE, GROUP_ASSIGN)))
+        out = []
+        for port, group in pairs:
+            entry = {"port": int(port), "group": group, "node": "", "error": ""}
+            if not self.runtime_ok:
+                entry["error"] = "runtime not ready"
+                out.append(entry)
+                continue
+            try:
+                entry["node"] = self.ctrl.selected(group)
+            except ControllerError as exc:
+                entry["error"] = str(exc)
+            out.append(entry)
+        return out
+
     def status(self):
         st = {
             "runtime_ok": self.runtime_ok,

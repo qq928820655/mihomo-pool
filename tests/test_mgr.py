@@ -667,5 +667,55 @@ class TestSettings(unittest.TestCase):
             self.assertIsInstance(json.load(open(p.settings_path)), dict)
 
 
+class TestHubExits(unittest.TestCase):
+    """端口 → 当前节点名：hub 靠它把槽位别名换成真实出口节点。"""
+
+    def _pool(self, selected=None, runtime_ok=True, raises=None):
+        p = m.Pool.__new__(m.Pool)
+        p.hub_ports = (7890, 7891, 7892)
+        p.runtime_ok = runtime_ok
+
+        class Ctrl:
+            def selected(self, group):
+                if raises:
+                    raise m.ControllerError("boom")
+                return (selected or {}).get(group, "")
+
+        p.ctrl = Ctrl()
+        return p
+
+    def test_maps_each_hub_port_to_its_group_node(self):
+        p = self._pool({"HUB-FIXED": "新加坡01", "HUB-ROTATE": "香港03",
+                        "HUB-ASSIGN": "澳门05"})
+        exits = p.hub_exits()
+        self.assertEqual([e["port"] for e in exits], [7890, 7891, 7892])
+        self.assertEqual([e["group"] for e in exits],
+                         ["HUB-FIXED", "HUB-ROTATE", "HUB-ASSIGN"])
+        self.assertEqual([e["node"] for e in exits],
+                         ["新加坡01", "香港03", "澳门05"])
+        self.assertEqual([e["error"] for e in exits], ["", "", ""])
+
+    def test_runtime_down_reports_error_and_no_node(self):
+        p = self._pool(runtime_ok=False)
+        exits = p.hub_exits()
+        self.assertEqual(len(exits), 3)
+        self.assertTrue(all(e["node"] == "" for e in exits))
+        self.assertTrue(all(e["error"] for e in exits))
+
+    def test_controller_error_is_isolated_per_port(self):
+        p = self._pool(raises=True)
+        exits = p.hub_exits()
+        self.assertEqual(len(exits), 3)
+        self.assertTrue(all(e["node"] == "" for e in exits))
+        self.assertTrue(all("boom" in e["error"] for e in exits))
+
+    def test_custom_hub_ports_are_followed(self):
+        p = self._pool({"HUB-FIXED": "a"})
+        p.hub_ports = (18000, 18001)
+        exits = p.hub_exits()
+        self.assertEqual([e["port"] for e in exits], [18000, 18001])
+        self.assertEqual([e["group"] for e in exits], ["HUB-FIXED", "HUB-ROTATE"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
