@@ -624,6 +624,84 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(listeners["HUB-IN-18001"]["proxy"], "HUB-ROTATE")
         self.assertEqual(listeners["HUB-IN-18002"]["proxy"], "HUB-ASSIGN")
 
+    def test_port_assignment_survives_a_reload(self):
+        """节点专属口必须跨重载保持不变。
+
+        分配原本按质量（上次测速延迟）排序，而延迟每次重启都会变，于是
+        17926 可能从节点 A 换到节点 B——指向它的槽位就会悄悄换出口。
+        这里钉住：上次的分配被持久化并在下一次重载时优先沿用。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            p = TestInject._fake_pool(self)
+            p.listen_base = 17901
+            p.listen_max = 32
+            p.node_list = ["a", "b", "c"]
+            p.port_pins = {}
+            p.port_assignments = {"a": 17901, "b": 17902, "c": 17903}
+            p.last_delays = {"a": 300, "b": 100, "c": 200}
+            doc = TestInject._doc(self)
+            port_map = p._phase2_doc(doc, ["a", "b", "c"])
+            self.assertEqual(port_map, {"a": 17901, "b": 17902, "c": 17903},
+                             "重载应沿用上次分配，而不是按延迟重排")
+
+    def test_a_new_node_takes_a_free_port(self):
+        """已有分配不变，新节点拿一个空闲端口，不挤掉别人。"""
+        with tempfile.TemporaryDirectory() as d:
+            p = TestInject._fake_pool(self)
+            p.listen_base = 17901
+            p.listen_max = 32
+            p.node_list = ["a", "b", "new"]
+            p.port_pins = {}
+            p.port_assignments = {"a": 17901, "b": 17902}
+            p.last_delays = {}
+            doc = TestInject._doc(self)
+            port_map = p._phase2_doc(doc, ["a", "b", "new"])
+            self.assertEqual(port_map["a"], 17901)
+            self.assertEqual(port_map["b"], 17902)
+            self.assertEqual(port_map["new"], 17903, "新节点应拿第一个空闲端口")
+
+    def test_a_removed_node_frees_its_port(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = TestInject._fake_pool(self)
+            p.listen_base = 17901
+            p.listen_max = 32
+            p.node_list = ["a"]
+            p.port_pins = {}
+            p.port_assignments = {"a": 17901, "gone": 17902}
+            p.last_delays = {}
+            doc = TestInject._doc(self)
+            port_map = p._phase2_doc(doc, ["a"])
+            self.assertEqual(port_map, {"a": 17901})
+            self.assertNotIn("gone", port_map)
+
+    def test_explicit_pins_win_over_stored_assignment(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = TestInject._fake_pool(self)
+            p.listen_base = 17901
+            p.listen_max = 32
+            p.node_list = ["a", "b"]
+            p.port_pins = {"a": 17905}
+            p.port_assignments = {"a": 17901, "b": 17902}
+            p.last_delays = {}
+            doc = TestInject._doc(self)
+            port_map = p._phase2_doc(doc, ["a", "b"])
+            self.assertEqual(port_map["a"], 17905, "手动钉住的端口优先")
+            self.assertEqual(port_map["b"], 17902, "其余沿用上次分配")
+
+    def test_assignments_round_trip_on_disk(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = TestInject._fake_pool(self)
+            p._assignments_path = os.path.join(d, "port_assignments.json")
+            p._save_assignments({"a": 17901, "b": 17902})
+            self.assertEqual(p._load_assignments(), {"a": 17901, "b": 17902})
+
+    def test_missing_assignment_file_loads_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = TestInject._fake_pool(self)
+            p._assignments_path = os.path.join(d, "port_assignments.json")
+            self.assertEqual(p._load_assignments(), {})
+
+
     def test_nodes_view_tested_flag(self):
         p = TestInject._fake_pool(self)
         p.node_list = ["a", "b", "c"]

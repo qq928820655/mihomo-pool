@@ -288,6 +288,8 @@ class Pool:
         self._ipq_path = os.path.join(self.runtime_dir, "ipq.json")
         self._pins_path = os.path.join(self.runtime_dir, "port_pins.json")
         self.port_pins = self._load_pins()
+        self._assignments_path = os.path.join(self.runtime_dir, "port_assignments.json")
+        self.port_assignments = self._load_assignments()
         self._ipq_cache = {"ips": {}, "node_ip": {}}
         self._load_ipq()
         self.proc = None
@@ -343,6 +345,29 @@ class Pool:
         try:
             with open(self._pins_path, "w", encoding="utf-8") as fh:
                 json.dump(self.port_pins, fh, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
+    def _load_assignments(self):
+        """Last port assignment (node → port), so a reload keeps it stable.
+
+        Without this the per-node ports are handed out by quality order every
+        reload, and quality is just the last measured delay — so a node can
+        move from 17926 to another port after any restart. A slot pointing at
+        17926 would then silently start using a different node, which defeats
+        the whole point of a per-node port.
+        """
+        try:
+            with open(self._assignments_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return {str(k): int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_assignments(self, port_map):
+        try:
+            with open(self._assignments_path, "w", encoding="utf-8") as fh:
+                json.dump(port_map, fh, ensure_ascii=False, indent=1)
         except OSError:
             pass
 
@@ -999,10 +1024,20 @@ class Pool:
         listeners = self._hub_listeners() + self._local_listeners()
         free = list(range(self.listen_base, self.listen_base + self.listen_max))
         port_map = {}
+        # 1. 显式钉住的优先（运维在面板上手动指定的端口）。
         for node, port in sorted(self.port_pins.items(), key=lambda kv: kv[1]):
             if node in names and port in free:
                 port_map[node] = port
                 free.remove(port)
+        # 2. 再沿用上次的分配：节点专属口必须跨重载保持不变，否则指向
+        #    :17926 的槽位会在重启后悄悄换到另一个节点。
+        for node, port in sorted(getattr(self, "port_assignments", {}).items(),
+                                 key=lambda kv: kv[1]):
+            if node in port_map or node not in names or port not in free:
+                continue
+            port_map[node] = port
+            free.remove(port)
+        # 3. 剩下的按质量排序分新端口（新节点、端口扩容才走这里）。
         for name in self._port_order(names):
             if name in port_map or not free:
                 continue
@@ -1040,6 +1075,8 @@ class Pool:
                 self.node_list = names
                 self.node_types = {n: (infos.get(n) or {}).get("type", "") for n in names}
                 self.port_map = port_map
+                self.port_assignments = dict(port_map)
+                self._save_assignments(self.port_assignments)
                 self.cache.clear()
                 self.runtime_ok = True
                 fixed = self.settings.get("fixed_node")
@@ -1243,6 +1280,8 @@ class Pool:
             self._dump(doc, self.runtime_path)
             self.ctrl.load_config(self.runtime_path)
             self.port_map = dict(new_map)
+            self.port_assignments = dict(new_map)
+            self._save_assignments(self.port_assignments)
         except Exception as exc:
             self.log("port map apply failed: %s" % exc)
 

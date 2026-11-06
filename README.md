@@ -10,7 +10,7 @@
 | 7890 | **固定出口**：面板「设为固定」后一直走该节点，重载自动恢复 |
 | 7891 | **动态轮换**：每 `interval_s` 秒在「关键词命中 + 延迟 ≤ max_ms」节点里随机换一个 |
 | 7892 | **分配出口**：API 传 key（如账号 ID），同一 key 稳定映射同一节点 |
-| 17901+ | **逐节点端口**：每个节点一个独享 mixed 端口（默认最多 32 个），供 Hub/CPA 按端口绑定账号 |
+| 17901+ | **逐节点端口**：每个节点一个独享 mixed 端口（默认最多 32 个），供 Hub/CPA 按端口绑定账号。分配结果落在 `runtime/port_assignments.json`，重载与重启后沿用，不会因测速延迟变化而漂移 |
 | 7893 | **本地直连 HTTP/SOCKS5**（无认证，出口=本机 DIRECT），`MPOOL_LOCAL_PORT` 可改 |
 | 17990 | **本地直连 vmess 节点**（UUID 认证，出口=本机 DIRECT），给 clash 客户端当节点用，`MPOOL_LOCAL_VLESS_PORT` 可改 |
 | 9090 | mihomo external-controller（仅 127.0.0.1，随机 secret，位于 `runtime/secret`） |
