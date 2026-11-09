@@ -383,6 +383,11 @@ class Pool:
         name = str(name or "").strip()
         if not name:
             raise PoolError("节点名不能为空")
+        # 只允许操作已知节点，避免把拼错的名字写进禁用表再触发一次无谓的重载。
+        # node_list 为空时（还没成功 reload 过）无法校验，放行。
+        known = set(getattr(self, "node_list", None) or []) | set(self.disabled_nodes)
+        if known and name not in known:
+            raise PoolError("未知节点: %s" % name)
         with self._lock:
             if disabled:
                 self.disabled_nodes.add(name)

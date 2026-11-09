@@ -125,4 +125,4 @@ CF 桥接端口（8444-8446）由平台自动映射为各自的 `<端口>-<域�
 - 首次导入含 `GEOIP` 规则的机场配置时，mihomo 会自动下载 geoip 数据库（走 GitHub），第一次重载会慢几秒。
 - 运行时配置 `runtime/config.yaml` 是生成的，别手改；改 `configs/source.yaml` 或重新导入后 reload。
 - 日志：`runtime/service.log`（服务）+ `runtime/mihomo.log`（内核）。
-- 测试：`.venv/bin/python tests/run_all.py`（101 例）。
+- 测试：`.venv/bin/python tests/run_all.py`（103 例）。

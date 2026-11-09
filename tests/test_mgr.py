@@ -644,6 +644,30 @@ class TestNodeDisable(unittest.TestCase):
             with self.assertRaises(m.PoolError):
                 p.set_node_disabled("   ", True)
 
+    def test_set_disable_rejects_unknown_node(self):
+        # A typo'd name must be rejected before it reaches the reload path;
+        # otherwise the API would persist a bogus entry and do a pointless
+        # full reload.
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.node_list = ["a", "b"]
+            with self.assertRaises(m.PoolError):
+                p.set_node_disabled("nope", True)
+            self.assertEqual(p.disabled_nodes, set())
+            # A disabled node can still be re-enabled (it is in the known set).
+            p.disabled_nodes = {"c"}
+            self.assertFalse(p.set_node_disabled("c", False))
+            self.assertNotIn("c", p.disabled_nodes)
+
+    def test_set_disable_allows_any_name_before_first_reload(self):
+        # node_list is empty until the first successful reload; do not block
+        # operations in that window.
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.node_list = []
+            self.assertTrue(p.set_node_disabled("anything", True))
+            self.assertIn("anything", p.disabled_nodes)
+
     def test_disabled_nodes_listed_in_view(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._pool(d)
