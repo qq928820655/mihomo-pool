@@ -3,6 +3,7 @@
 import datetime
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -45,6 +46,51 @@ HUB_PORTS = tuple(
 ) or (7890, 7891, 7892)
 BIN = os.path.join(ROOT, ENV.get("MPOOL_BIN") or "bin/mihomo")
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
+
+
+def panel_version():
+    """Identify the panel build, not the mihomo core.
+
+    The header already shows the mihomo *core* version (``mihomo v1.19.33``),
+    which is identical across unrelated panel builds — two different panel
+    checkouts looked "the same version" while serving different HTML. Report
+    the git short sha plus its commit date so a deployment is identifiable at
+    a glance. A source tarball without ``.git`` has no sha; fall back to the
+    file mtime so the field is still non-empty and honest.
+    """
+    try:
+        sha = subprocess.check_output(
+            ["git", "-C", ROOT, "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=5,
+        ).decode("utf-8", "replace").strip()
+        when = subprocess.check_output(
+            ["git", "-C", ROOT, "log", "-1", "--format=%ci"],
+            stderr=subprocess.DEVNULL, timeout=5,
+        ).decode("utf-8", "replace").strip()
+        # A dirty tree means the served files are not exactly this commit — the
+        # exact "same sha, different content" trap. Mark it instead of hiding it.
+        try:
+            dirty = bool(subprocess.check_output(
+                ["git", "-C", ROOT, "status", "--porcelain"],
+                stderr=subprocess.DEVNULL, timeout=5,
+            ).strip())
+        except (OSError, subprocess.SubprocessError):
+            dirty = False
+        if sha:
+            return {"commit": sha + ("+dirty" if dirty else ""),
+                    "date": when[:16], "source": "git", "dirty": dirty}
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        when = datetime.datetime.fromtimestamp(
+            os.path.getmtime(os.path.join(ROOT, "index.html"))
+        ).strftime("%Y-%m-%d %H:%M")
+    except OSError:
+        when = ""
+    return {"commit": "", "date": when, "source": "mtime", "dirty": False}
+
+
+PANEL_VERSION = panel_version()
 
 
 def log(msg):
@@ -328,7 +374,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route_get(self, path, query):
         if path == "/api/v1/status":
-            return self._json(200, {"ok": True, "status": POOL.status()})
+            st = POOL.status()
+            st["panel_version"] = PANEL_VERSION
+            return self._json(200, {"ok": True, "status": st})
         if path == "/api/v1/nodes":
             keywords = (query.get("keywords") or [""])[0]
             return self._json(200, {"ok": True, "nodes": POOL.nodes_view(keywords)})

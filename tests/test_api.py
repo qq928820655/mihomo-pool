@@ -117,6 +117,19 @@ class TestApi(unittest.TestCase):
         code, _ = self.req("/api/v1/status?token=testtoken", token=None)
         self.assertEqual(code, 200)
 
+    def test_status_reports_panel_version(self):
+        # The header shows the mihomo *core* version, which is the same across
+        # different panel builds; panel_version identifies the panel itself.
+        code, data = self.req("/api/v1/status")
+        self.assertEqual(code, 200)
+        pv = data["status"]["panel_version"]
+        self.assertIn("commit", pv)
+        self.assertIn("date", pv)
+        self.assertIn("source", pv)
+        self.assertIn(pv["source"], ("git", "mtime"))
+        # Either a git sha or an mtime date must be present, never both empty.
+        self.assertTrue(pv["commit"] or pv["date"])
+
     def test_pick_returns_proxy_url(self):
         from urllib.parse import quote
         code, data = self.req("/api/v1/pick?keywords=" + quote("香港") + "&max_ms=500")
@@ -202,6 +215,8 @@ class TestApi(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as resp:
             body = resp.read().decode()
         self.assertIn("mihomo-pool", body)
+        # The panel shows its own build next to the mihomo core version.
+        self.assertIn('id="pver"', body)
 
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
 </head>
 <body>
 <header>
-  <span><span class="dot" id="dot"></span><b>mihomo-pool</b> <span class="ver" id="ver"></span></span>
+  <span><span class="dot" id="dot"></span><b>mihomo-pool</b> <span class="ver" id="ver"></span> <span class="ver" id="pver" title="面板版本（git 提交 + 日期）；与上面的 mihomo 内核版本无关"></span></span>
   <span style="flex:1"></span>
   <input id="token" type="password" placeholder="API Token" title="只需输入一次，自动保存在浏览器本地" style="width:180px" oninput="localStorage.setItem('mpool_token',this.value)">
 </header>
@@ -211,6 +211,8 @@ async function refresh(){
     const d=await api('/api/v1/status');STATUS=d.status;const s=d.status;
     $('#dot').className='dot'+(s.runtime_ok?' on':'');
     $('#ver').textContent=s.mihomo_version?('mihomo '+s.mihomo_version):'';
+    const pv=s.panel_version;
+    $('#pver').textContent=pv&&(pv.commit||pv.date)?('面板 '+[pv.commit,pv.date].filter(Boolean).join(' · ')):'';
     $('#c-run').innerHTML=s.runtime_ok?'<span class="ok">运行中</span>':'<span class="err">未就绪</span>';
     $('#c-run').title=s.last_error||'';
     $('#c-nodes').textContent=s.node_count+' / '+s.node_ports;

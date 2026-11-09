@@ -2,6 +2,8 @@
 
 把一个 mihomo 实例变成**多出口代理池**：固定出口 / 定时随机轮换 / 按账号粘性分配 / 逐节点独享端口，并自带管理面板与分配 API。
 
+面板页头同时显示两个版本：`mihomo vX.Y.Z` 是 **mihomo 内核**版本，`面板 <短 sha> · <提交日期>` 是**面板自身**的构建版本（`GET /api/v1/status` 的 `panel_version` 字段；无 `.git` 的源码包回退到 `index.html` 修改时间）。内核版本在不同面板构建间往往相同，核对「两台机器是不是同一份面板」要看后者。
+
 ## 端口拓扑
 
 | 端口 | 用途 |
@@ -121,4 +123,4 @@ CF 桥接端口（8444-8446）由平台自动映射为各自的 `<端口>-<域�
 - 首次导入含 `GEOIP` 规则的机场配置时，mihomo 会自动下载 geoip 数据库（走 GitHub），第一次重载会慢几秒。
 - 运行时配置 `runtime/config.yaml` 是生成的，别手改；改 `configs/source.yaml` 或重新导入后 reload。
 - 日志：`runtime/service.log`（服务）+ `runtime/mihomo.log`（内核）。
-- 测试：`.venv/bin/python tests/run_all.py`（52 例）。
+- 测试：`.venv/bin/python tests/run_all.py`（92 例）。
