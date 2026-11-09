@@ -61,6 +61,12 @@ class FakePool:
     def reload(self):
         return {"nodes": 2, "node_ports": 2}
 
+    def set_node_disabled(self, name, disabled):
+        if name not in self.node_list:
+            raise m.PoolError("未知节点: %s" % name)
+        self.disabled = (name, disabled)
+        return bool(disabled)
+
     def import_source(self, data, name="upload.yaml"):
         if b"broken" in data:
             raise m.ConfigError("YAML 解析失败")
@@ -157,6 +163,30 @@ class TestApi(unittest.TestCase):
                               json.dumps({"port": 7890, "node": "nope"}))
         self.assertEqual(code, 409)
         self.assertIn("未知节点", data["error"])
+
+    def test_node_disable_toggles_and_reloads(self):
+        code, data = self.req("/api/v1/nodes/disable", "POST",
+                              json.dumps({"node": "a", "disabled": True}))
+        self.assertEqual(code, 200)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["disabled"])
+        self.assertEqual(data["node"], "a")
+        self.assertIn("reload", data)
+
+    def test_node_disable_defaults_to_true(self):
+        code, data = self.req("/api/v1/nodes/disable", "POST",
+                              json.dumps({"node": "b"}))
+        self.assertEqual(code, 200)
+        self.assertTrue(data["disabled"])
+
+    def test_node_disable_requires_node(self):
+        code, data = self.req("/api/v1/nodes/disable", "POST", json.dumps({}))
+        self.assertEqual(code, 400)
+
+    def test_node_disable_unknown_node_conflict(self):
+        code, data = self.req("/api/v1/nodes/disable", "POST",
+                              json.dumps({"node": "nope", "disabled": True}))
+        self.assertEqual(code, 409)
 
     def test_pick_with_key_is_sticky_7892(self):
         code, data = self.req("/api/v1/pick?key=acc")

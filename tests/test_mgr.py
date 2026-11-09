@@ -583,6 +583,86 @@ class TestImport(unittest.TestCase):
             self.assertEqual(meta["name"], "p.yaml")
 
 
+class TestNodeDisable(unittest.TestCase):
+    def _pool(self, d):
+        p = m.Pool.__new__(m.Pool)
+        p.disabled_nodes = set()
+        p._disabled_path = os.path.join(d, "disabled_nodes.json")
+        p._lock = __import__("threading").RLock()
+        return p
+
+    def _doc(self):
+        return {
+            "proxies": [
+                {"name": "a", "type": "ss", "server": "1.1.1.1", "port": 443},
+                {"name": "b", "type": "ss", "server": "2.2.2.2", "port": 443},
+                {"name": "c", "type": "ss", "server": "3.3.3.3", "port": 443},
+            ],
+            "proxy-groups": [
+                {"name": "PROXY", "type": "select", "proxies": ["a", "b", "c"]},
+                {"name": "AUTO", "type": "url-test", "proxies": ["a", "b", "c"]},
+            ],
+        }
+
+    def test_drop_removes_proxies_and_group_refs(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.disabled_nodes = {"b"}
+            doc = self._doc()
+            dropped = p._drop_disabled(doc)
+            self.assertEqual(dropped, {"b"})
+            self.assertEqual([x["name"] for x in doc["proxies"]], ["a", "c"])
+            for g in doc["proxy-groups"]:
+                self.assertEqual(g["proxies"], ["a", "c"])
+
+    def test_drop_noop_when_nothing_disabled(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            doc = self._doc()
+            dropped = p._drop_disabled(doc)
+            self.assertEqual(dropped, set())
+            self.assertEqual([x["name"] for x in doc["proxies"]], ["a", "b", "c"])
+
+    def test_set_disable_persists_and_toggles(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            self.assertTrue(p.set_node_disabled("b", True))
+            self.assertIn("b", p.disabled_nodes)
+            self.assertTrue(os.path.exists(p._disabled_path))
+            # A fresh load sees the persisted name.
+            p2 = self._pool(d)
+            self.assertEqual(p2._load_disabled(), {"b"})
+            # Re-enabling removes it.
+            p.set_node_disabled("b", False)
+            self.assertNotIn("b", p.disabled_nodes)
+            p3 = self._pool(d)
+            self.assertEqual(p3._load_disabled(), set())
+
+    def test_set_disable_rejects_empty_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            with self.assertRaises(m.PoolError):
+                p.set_node_disabled("   ", True)
+
+    def test_disabled_nodes_listed_in_view(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.node_list = ["a", "c"]
+            p.node_types = {"a": "ss", "c": "ss"}
+            p.port_map = {"a": 17901}
+            p.port_pins = {}
+            p.node_quality = {}
+            p.cache = m.DelayCache()
+            p.settings = dict(m.DEFAULT_SETTINGS)
+            p.disabled_nodes = {"b"}
+            view = {n["name"]: n for n in p.nodes_view()}
+            self.assertIn("b", view)
+            self.assertTrue(view["b"]["disabled"])
+            self.assertIsNone(view["b"]["listener_port"])
+            self.assertFalse(view["a"]["disabled"])
+            self.assertEqual(view["a"]["listener_port"], 17901)
+
+
 class TestSettings(unittest.TestCase):
     def _pool(self, d):
         p = m.Pool.__new__(m.Pool)

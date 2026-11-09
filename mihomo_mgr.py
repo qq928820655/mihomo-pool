@@ -290,6 +290,9 @@ class Pool:
         self.port_pins = self._load_pins()
         self._assignments_path = os.path.join(self.runtime_dir, "port_assignments.json")
         self.port_assignments = self._load_assignments()
+        # 禁用节点：配置里保留、运行时不加载。按名字持久化，重载/重启后沿用。
+        self._disabled_path = os.path.join(self.runtime_dir, "disabled_nodes.json")
+        self.disabled_nodes = self._load_disabled()
         self._ipq_cache = {"ips": {}, "node_ip": {}}
         self._load_ipq()
         self.proc = None
@@ -347,6 +350,46 @@ class Pool:
                 json.dump(self.port_pins, fh, ensure_ascii=False, indent=1)
         except OSError:
             pass
+
+    def _load_disabled(self):
+        """Names of nodes the operator disabled.
+
+        Disabled nodes stay in the source config but are dropped before the
+        runtime config is built, so they never become selectable exits, never
+        get a per-node port, and never get picked by rotation/assignment.
+        Persisted by name so the choice survives reload and restart.
+        """
+        try:
+            with open(self._disabled_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return set(str(x) for x in data) if isinstance(data, list) else set()
+        except (OSError, ValueError):
+            return set()
+
+    def _save_disabled(self):
+        try:
+            with open(self._disabled_path, "w", encoding="utf-8") as fh:
+                json.dump(sorted(self.disabled_nodes), fh, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
+    def set_node_disabled(self, name, disabled):
+        """Enable/disable one node and persist it.
+
+        Returns the new state. Enabling a node only takes effect on the next
+        reload (the runtime config must be rebuilt), so the caller decides
+        whether to reload; the API layer reloads on change.
+        """
+        name = str(name or "").strip()
+        if not name:
+            raise PoolError("节点名不能为空")
+        with self._lock:
+            if disabled:
+                self.disabled_nodes.add(name)
+            else:
+                self.disabled_nodes.discard(name)
+            self._save_disabled()
+        return bool(disabled)
 
     def _load_assignments(self):
         """Last port assignment (node → port), so a reload keeps it stable.
@@ -1016,6 +1059,39 @@ class Pool:
                 groups.append({"name": gname, "type": "select", "proxies": ["DIRECT"]})
         return removed, (len(user_listeners) if isinstance(user_listeners, list) else 0)
 
+    def _drop_disabled(self, doc):
+        """Remove disabled nodes from the config before mihomo loads it.
+
+        Drops them from ``proxies`` and from every ``proxy-groups`` member
+        list. A group that still referenced a node we removed would make the
+        whole config fail to load, so the reference must go too. Nodes that
+        come from ``proxy-providers`` are not in ``proxies`` here; those are
+        filtered by name later (``names``), which keeps them out of the pool's
+        groups and per-node ports even though mihomo still holds them.
+        Returns the names actually removed from ``proxies``.
+        """
+        if not self.disabled_nodes:
+            return set()
+        dropped = set()
+        proxies = doc.get("proxies")
+        if isinstance(proxies, list):
+            kept = []
+            for p in proxies:
+                if isinstance(p, dict) and str(p.get("name") or "") in self.disabled_nodes:
+                    dropped.add(str(p.get("name")))
+                else:
+                    kept.append(p)
+            doc["proxies"] = kept
+        groups = doc.get("proxy-groups")
+        if isinstance(groups, list):
+            for g in groups:
+                if not isinstance(g, dict):
+                    continue
+                members = g.get("proxies")
+                if isinstance(members, list):
+                    g["proxies"] = [m for m in members if str(m) not in self.disabled_nodes]
+        return dropped
+
     def _phase2_doc(self, doc, names):
         for gname in GROUPS:
             for g in doc.get("proxy-groups", []):
@@ -1062,18 +1138,42 @@ class Pool:
                 if not isinstance(doc, dict):
                     raise ConfigError("配置根节点必须是映射")
                 removed, dropped_listeners = self._phase1_doc(doc)
+                # 记下配置里每个 proxy 的类型（含即将被禁用的），否则被禁用的
+                # 节点在面板上类型列会是空的——它的 type 只在 doc["proxies"] 里。
+                doc_types = {
+                    str(p.get("name")): str(p.get("type") or "")
+                    for p in (doc.get("proxies") or [])
+                    if isinstance(p, dict) and p.get("name")
+                }
+                # 先按禁用名单剔除，再交给 mihomo；否则被禁用的节点仍会出现在
+                # /proxies 里，继续被选为出口。
+                self._drop_disabled(doc)
+                # 若剔除后一个 proxy 都不剩（且没有 proxy-providers 兜底），
+                # 在写盘/加载之前就失败，避免把一份空配置推给 mihomo。
+                proxies_now = doc.get("proxies")
+                if isinstance(proxies_now, list) and not proxies_now and not doc.get("proxy-providers"):
+                    raise ConfigError("所有节点都被禁用，至少启用一个")
                 self._dump(doc, self.runtime_path)
                 self.ensure_running()
                 self.ctrl.load_config(self.runtime_path)
                 infos = self.ctrl.nodes()
                 if not infos:
                     raise ConfigError("配置里没有可用节点")
-                names = sorted(infos)
+                all_names = sorted(infos)
+                # proxy-providers 里的节点不在 doc["proxies"] 中，_drop_disabled
+                # 删不到，这里按名字再滤一遍，保证它们也不进池、不占端口。
+                names = [n for n in all_names if n not in self.disabled_nodes]
+                if not names:
+                    raise ConfigError("所有节点都被禁用，至少启用一个")
                 port_map = self._phase2_doc(doc, names)
                 self._dump(doc, self.runtime_path)
                 self.ctrl.load_config(self.runtime_path)
                 self.node_list = names
                 self.node_types = {n: (infos.get(n) or {}).get("type", "") for n in names}
+                # 被禁用节点的类型从 doc 里补回，面板上类型列才不是空的。
+                for n in self.disabled_nodes:
+                    if n not in self.node_types and n in doc_types:
+                        self.node_types[n] = doc_types[n]
                 self.port_map = port_map
                 self.port_assignments = dict(port_map)
                 self._save_assignments(self.port_assignments)
@@ -1470,6 +1570,7 @@ class Pool:
 
     def nodes_view(self, keywords=""):
         fresh = self.cache.fresh(self.settings["ttl_s"]) or self.cache.all()
+        kw = keywords if keywords else self.settings["keywords"]
         out = []
         for name in self.node_list:
             out.append(
@@ -1481,7 +1582,25 @@ class Pool:
                     "listener_port": self.port_map.get(name),
                     "pinned": name in self.port_pins,
                     "quality": self.node_quality.get(name),
-                    "match": keywords_match(name, keywords if keywords else self.settings["keywords"]),
+                    "disabled": False,
+                    "match": keywords_match(name, kw),
+                }
+            )
+        # 被禁用的节点也要列出来，否则面板上再也找不到「重新启用」的入口。
+        # 它们不在 node_list / port_map 里（不占端口、不参与轮换），只带名字。
+        active = set(self.node_list)
+        for name in sorted(getattr(self, "disabled_nodes", set()) - active):
+            out.append(
+                {
+                    "name": name,
+                    "type": self.node_types.get(name, ""),
+                    "delay_ms": None,
+                    "tested": False,
+                    "listener_port": None,
+                    "pinned": False,
+                    "quality": None,
+                    "disabled": True,
+                    "match": keywords_match(name, kw),
                 }
             )
         return out

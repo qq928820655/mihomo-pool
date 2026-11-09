@@ -408,6 +408,22 @@ class Handler(BaseHTTPRequestHandler):
             body = self._json_body()
             res = POOL.refresh_delays()
             return self._json(200, {"ok": True, "delays": res, "count": len(res)})
+        if path == "/api/v1/nodes/disable":
+            body = self._json_body()
+            node = str(body.get("node") or "").strip()
+            if not node:
+                return self._error(400, "缺少 node")
+            disabled = bool(body.get("disabled", True))
+            POOL.set_node_disabled(node, disabled)
+            # 禁用/启用都要重建运行配置才生效：禁用把它从运行配置里拿掉，
+            # 启用把它加回来。重载失败时把状态还原，别让持久化与运行态脱节。
+            try:
+                reload_res = POOL.reload()
+            except Exception:
+                POOL.set_node_disabled(node, not disabled)
+                raise
+            return self._json(200, {"ok": True, "node": node, "disabled": disabled,
+                                    "reload": reload_res})
         if path == "/api/v1/rotate":
             body = self._json_body()
             node = POOL.rotate_now(keywords=body.get("keywords"), max_ms=body.get("max_ms"))

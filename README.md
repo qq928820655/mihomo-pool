@@ -55,6 +55,7 @@ curl "http://<IP>:8006/api/v1/pick?key=账号ID" -H "X-Token: <token>"
 - `GET /api/v1/pick?key=<账号ID>`：粘性分配，同 key 恒定同节点；无 key 随机。
 - `POST /api/v1/fixed {"node": ...}`：设置固定出口。
 - `POST /api/v1/ports/bind {"node": ..., "port": 17905}`：**手动钉端口**——把节点钉到指定端口，立即生效并持久化，重载/自动重排都保持（`port: null` 解除钉住，面板节点行「钉端口」按钮同效）；被占用/超范围/重复钉返回 409。
+- `POST /api/v1/nodes/disable {"node": ..., "disabled": true}`：**禁用/启用节点**——禁用后该节点从运行配置里剔除：不再是可选出口、不占每节点端口、不参与轮换与分配，但配置里保留，随时可重新启用。按名字持久化到 `runtime/disabled_nodes.json`，重载与重启后沿用；`disabled:false` 重新启用。返回 409 表示节点不存在，400 表示缺少 `node`；全部节点被禁用会被拒绝（至少保留一个）。
 - 面板「重载配置」= **一键按综合分重排全部端口**（钉住的除外）；每轮测速后死节点端口自动回收、按综合分补给。
 
 鉴权三选一：`Authorization: Bearer <token>` / `X-Token: <token>` / `?token=`。
@@ -62,8 +63,9 @@ curl "http://<IP>:8006/api/v1/pick?key=账号ID" -H "X-Token: <token>"
 ```
 GET /api/v1/pick?keywords=香港,家庭&max_ms=500   随机取一个门限内出口（默认关键词/门限取设置）
 GET /api/v1/pick?key=account-42&keywords=香港    粘性分配：同一 key 恒定同一节点（走 7892 或其独享端口）
-GET /api/v1/nodes[?keywords=]                    节点列表 + 延迟 + 独享端口 + 关键词命中
+GET /api/v1/nodes[?keywords=]                    节点列表 + 延迟 + 独享端口 + 关键词命中（含已禁用节点，disabled=true）
 POST /api/v1/nodes/test {}                       立即全量测速（mihomo 组测速，超时=max_ms×3）
+POST /api/v1/nodes/disable {"node":"名字","disabled":true}  禁用/启用节点（重新启用传 false）
 POST /api/v1/fixed {"node":"名字"}               设固定出口
 POST /api/v1/rotate {"keywords":null,"max_ms":null}  立即轮换一次
 GET  /api/v1/status                              运行状态
@@ -123,4 +125,4 @@ CF 桥接端口（8444-8446）由平台自动映射为各自的 `<端口>-<域�
 - 首次导入含 `GEOIP` 规则的机场配置时，mihomo 会自动下载 geoip 数据库（走 GitHub），第一次重载会慢几秒。
 - 运行时配置 `runtime/config.yaml` 是生成的，别手改；改 `configs/source.yaml` 或重新导入后 reload。
 - 日志：`runtime/service.log`（服务）+ `runtime/mihomo.log`（内核）。
-- 测试：`.venv/bin/python tests/run_all.py`（92 例）。
+- 测试：`.venv/bin/python tests/run_all.py`（101 例）。

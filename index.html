@@ -47,6 +47,9 @@ pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padd
 label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:13px;color:var(--dim)}
 .badge{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;background:var(--panel2);border:1px solid var(--line);color:var(--dim)}
 .badge.on{color:var(--ok);border-color:var(--ok)}
+.badge.off{color:var(--err);border-color:var(--err)}
+tr.node-disabled td{opacity:.5}
+tr.node-disabled td:first-child{text-decoration:line-through}
 </style>
 </head>
 <body>
@@ -96,7 +99,7 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
     <div id="nodes-count" class="muted" style="font-size:12px;margin:4px 0"></div>
     <div style="max-height:62vh;overflow:auto">
     <table><thead><tr id="nodes-head"><th data-k="name" onclick="setSort('name')">节点</th><th data-k="type" onclick="setSort('type')">类型</th><th data-k="delay_ms" onclick="setSort('delay_ms')">延迟</th><th data-k="qscore" onclick="setSort('qscore')">纯度</th><th data-k="listener_port" onclick="setSort('listener_port')">端口</th><th data-k="match" onclick="setSort('match')">门限</th><th></th></tr></thead>
-    <tbody id="nodes-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody></table>
+    <tbody id="nodes-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody></table>
     </div>
   </div>
   <div class="page" id="p-import">
@@ -147,6 +150,7 @@ label.f{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;font-size:
       </div>
     </div>
   </div>
+  <div class="page" id="p-local">
     <div class="box"><h3>一键导入本地节点（出口 = 本机 DIRECT）</h3>
       <div class="muted" style="font-size:13px" id="local-note"></div>
       <div class="row" style="margin-top:10px">
@@ -289,13 +293,34 @@ async function loadNodes(){
   $('#nodes-count').textContent=rows.length===d.nodes.length?('共 '+d.nodes.length+' 个节点'):('过滤后 '+rows.length+' / '+d.nodes.length+' 个节点');
   $('#nodes-body').innerHTML=rows.length?rows.map(n=>{
     let dcls,dtxt;
-    if(n.delay_ms==null){if(n.tested){dcls='d-bad';dtxt='超时'}else{dcls='muted';dtxt='未测'}}
+    if(n.disabled){dcls='muted';dtxt='已禁用'}
+    else if(n.delay_ms==null){if(n.tested){dcls='d-bad';dtxt='超时'}else{dcls='muted';dtxt='未测'}}
     else{dcls=n.delay_ms<=max?'d-ok':'d-bad';dtxt=n.delay_ms+'ms'}
-    return `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${qcell(n.quality)}</td><td>${n.listener_port??'—'}${n.pinned?' 📌':''}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td><button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button> <button class="btn mini" onclick="pinPort(this)" data-n="${esc(n.name)}" data-p="${n.listener_port??''}">钉端口</button></td></tr>`;
-  }).join(''):'<tr><td colspan="6" class="muted">'+(d.nodes.length?'没有匹配的节点':'没有节点')+'</td></tr>';
+    const nameCell=n.disabled
+      ? `${esc(n.name)} <span class="badge off">已禁用</span>`
+      : esc(n.name);
+    const toggleBtn=n.disabled
+      ? `<button class="btn mini" onclick="toggleNode(this)" data-n="${esc(n.name)}" data-d="0">启用</button>`
+      : `<button class="btn mini gray" onclick="toggleNode(this)" data-n="${esc(n.name)}" data-d="1">禁用</button>`;
+    const fixedBtn=n.disabled?'':`<button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button> <button class="btn mini" onclick="pinPort(this)" data-n="${esc(n.name)}" data-p="${n.listener_port??''}">钉端口</button> `;
+    return `<tr class="${n.disabled?'node-disabled':''}"><td>${nameCell}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${n.disabled?'—':qcell(n.quality)}</td><td>${n.listener_port??'—'}${n.pinned?' 📌':''}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td>${fixedBtn}${toggleBtn}</td></tr>`;
+  }).join(''):'<tr><td colspan="7" class="muted">'+(d.nodes.length?'没有匹配的节点':'没有节点')+'</td></tr>';
 }
 async function setFixed(btn){
   try{const d=await api('/api/v1/fixed',{method:'POST',body:JSON.stringify({node:btn.dataset.n})});toast('固定出口 → '+d.node);refresh()}catch(e){toast(e.message,1)}
+}
+// 禁用/启用单个节点。禁用后该节点从运行配置里剔除：不再是可选出口、不占
+// 每节点端口、不参与轮换与分配；重新启用会把它加回来。两者都要重建运行配置，
+// 服务端在 /api/v1/nodes/disable 里处理并 reload，这里只需刷新列表。
+async function toggleNode(btn){
+  const n=btn.dataset.n, disable=btn.dataset.d==='1';
+  if(disable && !confirm('禁用节点「'+n+'」？\n禁用后它不再是可选出口、不占端口、不参与轮换与分配，但配置里保留，随时可重新启用。'))return;
+  btn.disabled=true;
+  try{
+    await api('/api/v1/nodes/disable',{method:'POST',body:JSON.stringify({node:n,disabled:disable})});
+    toast((disable?'已禁用 ':'已启用 ')+n);
+    loadNodes();refresh();
+  }catch(e){toast(e.message,1);btn.disabled=false}
 }
 // 三个共享出口端口的节点选择器。端口来自 status.hub_ports，节点来自节点表，
 // 所以订阅换了、端口改了都不用改前端。
