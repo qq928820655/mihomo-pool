@@ -494,6 +494,13 @@ class Handler(BaseHTTPRequestHandler):
             meta = POOL.import_source(data, os.path.basename(fp))
             reload_res = POOL.reload()
             return self._json(200, {"ok": True, "source": meta, "reload": reload_res})
+        if path == "/api/v1/nodes/export":
+            body = self._json_body()
+            nodes = body.get("nodes")
+            if not isinstance(nodes, list):
+                return self._error(400, "nodes 需为数组")
+            res = POOL.export_config(nodes, str(body.get("filename") or ""))
+            return self._json(200, {"ok": True, **res})
         if path == "/api/v1/history/restore":
             body = self._json_body()
             name = os.path.basename(str(body.get("file") or ""))

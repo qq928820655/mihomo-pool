@@ -56,6 +56,7 @@ curl "http://<IP>:8006/api/v1/pick?key=账号ID" -H "X-Token: <token>"
 - `POST /api/v1/fixed {"node": ...}`：设置固定出口。
 - `POST /api/v1/ports/bind {"node": ..., "port": 17905}`：**手动钉端口**——把节点钉到指定端口，立即生效并持久化，重载/自动重排都保持（`port: null` 解除钉住，面板节点行「钉端口」按钮同效）；被占用/超范围/重复钉返回 409。
 - `POST /api/v1/nodes/disable {"node": ..., "disabled": true}`：**禁用/启用节点**——禁用后该节点从运行配置里剔除：不再是可选出口、不占每节点端口、不参与轮换与分配，但配置里保留，随时可重新启用。按名字持久化到 `runtime/disabled_nodes.json`，重载与重启后沿用；`disabled:false` 重新启用。返回 409 表示节点不存在，400 表示缺少 `node`；全部节点被禁用会被拒绝（至少保留一个）。
+- `POST /api/v1/nodes/export {"nodes": ["节点A", "节点B"], "filename": "..."}`：**按勾选拆分导出配置**——把选中的节点拆成一份独立 clash 配置（`proxies` + 一个 `PROXY` 选择组 + `MATCH,PROXY`），供**别的 pool** 导入使用。导出内容**不含**本 pool 的入站声明（`listeners` / `port` / `mixed-port` 等）与 `HUB-*` 组，避免导到别处撞端口或指向不存在的节点。节点名按勾选顺序保留、重复自动去重；名字不存在直接 409（不静默跳过，否则会导出一份「少一个节点」的配置）。源配置只有 `proxy-providers` 时无法按名字拆分，返回 409 并说明原因。面板节点页勾选后点「导出所选配置」即下载，文件名带日期与节点数。
 - 面板「重载配置」= **一键按综合分重排全部端口**（钉住的除外）；每轮测速后死节点端口自动回收、按综合分补给。
 
 鉴权三选一：`Authorization: Bearer <token>` / `X-Token: <token>` / `?token=`。
@@ -66,6 +67,7 @@ GET /api/v1/pick?key=account-42&keywords=香港    粘性分配：同一 key 恒
 GET /api/v1/nodes[?keywords=]                    节点列表 + 延迟 + 独享端口 + 关键词命中（含已禁用节点，disabled=true）
 POST /api/v1/nodes/test {}                       立即全量测速（mihomo 组测速，超时=max_ms×3）
 POST /api/v1/nodes/disable {"node":"名字","disabled":true}  禁用/启用节点（重新启用传 false）
+POST /api/v1/nodes/export {"nodes":["名字1","名字2"]}        按勾选拆分导出独立配置（给别的 pool 用）
 POST /api/v1/fixed {"node":"名字"}               设固定出口
 POST /api/v1/rotate {"keywords":null,"max_ms":null}  立即轮换一次
 GET  /api/v1/status                              运行状态

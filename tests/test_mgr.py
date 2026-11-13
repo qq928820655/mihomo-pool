@@ -990,5 +990,121 @@ class TestHubExits(unittest.TestCase):
         self.assertEqual(nodes[0]["error"], "")
 
 
+
+class TestExportConfig(unittest.TestCase):
+    """导出给「别的 pool」用的独立配置：只带勾选的节点，不带本 pool 的入站。"""
+
+    def _pool(self, d, doc=None):
+        p = m.Pool.__new__(m.Pool)
+        p.source_path = os.path.join(d, "source.yaml")
+        p.log = lambda s: None
+        data = doc if doc is not None else {
+            "mixed-port": 7890,
+            "proxies": [
+                {"name": "🇭🇰 香港 01", "type": "ss", "server": "1.1.1.1", "port": 443,
+                 "cipher": "aes-128-gcm", "password": "x"},
+                {"name": "🇯🇵 日本 01", "type": "ss", "server": "2.2.2.2", "port": 443,
+                 "cipher": "aes-128-gcm", "password": "y"},
+                {"name": "home-01", "type": "ss", "server": "3.3.3.3", "port": 443,
+                 "cipher": "aes-128-gcm", "password": "z"},
+            ],
+            "proxy-groups": [{"name": "PROXY", "type": "select", "proxies": ["🇭🇰 香港 01"]}],
+            "rules": ["MATCH,PROXY"],
+        }
+        import yaml
+        with open(p.source_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(data, fh, allow_unicode=True)
+        return p
+
+    def test_exports_only_selected_nodes(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            res = p.export_config(["🇭🇰 香港 01", "home-01"], "my-sub")
+            doc = yaml.safe_load(res["content"])
+            names = [x["name"] for x in doc["proxies"]]
+            self.assertEqual(names, ["🇭🇰 香港 01", "home-01"])
+            self.assertNotIn("🇯🇵 日本 01", names)
+            self.assertEqual(res["count"], 2)
+            self.assertEqual(res["filename"], "my-sub.yaml")
+
+    def test_export_drops_pool_listeners_and_hub_groups(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            doc = yaml.safe_load(p.export_config(["home-01"])["content"])
+            # 本 pool 的入站端口 / 监听器不能带出去，否则导到别的 pool 会撞端口
+            for key in ("listeners", "port", "socks-port", "redir-port", "tproxy-port", "secret"):
+                self.assertNotIn(key, doc)
+            groups = [g["name"] for g in doc["proxy-groups"]]
+            self.assertEqual(groups, ["PROXY"])
+            self.assertTrue(all(not g.startswith("HUB-") for g in groups))
+            self.assertEqual(doc["rules"], ["MATCH,PROXY"])
+            self.assertEqual(doc["proxy-groups"][0]["proxies"], ["home-01", "DIRECT"])
+
+    def test_export_keeps_selection_order_and_dedupes(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            res = p.export_config(["home-01", "🇭🇰 香港 01", "home-01"])
+            doc = yaml.safe_load(res["content"])
+            self.assertEqual([x["name"] for x in doc["proxies"]], ["home-01", "🇭🇰 香港 01"])
+            self.assertEqual(res["count"], 2)
+
+    def test_empty_selection_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            for bad in ([], [""], ["  "], None):
+                with self.assertRaises(m.PoolError):
+                    p.export_config(bad)
+
+    def test_unknown_node_rejected_instead_of_silently_skipped(self):
+        # 拼错的节点名必须报错：静默跳过会导出一份「少了一个节点」的配置，
+        # 而运维以为已经导全了。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            with self.assertRaises(m.PoolError) as ctx:
+                p.export_config(["home-01", "不存在的节点"])
+            self.assertIn("不存在的节点", str(ctx.exception))
+
+    def test_no_source_config_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = m.Pool.__new__(m.Pool)
+            p.source_path = os.path.join(d, "missing.yaml")
+            p.log = lambda s: None
+            with self.assertRaises(m.PoolError):
+                p.export_config(["a"])
+
+    def test_providers_only_source_explains_why(self):
+        # proxy-providers 的节点不在 source.yaml 的 proxies 里，没法按名字拆。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d, doc={"proxy-providers": {"sub": {"type": "http", "url": "http://x/y"}}})
+            with self.assertRaises(m.ConfigError) as ctx:
+                p.export_config(["a"])
+            self.assertIn("proxy-providers", str(ctx.exception))
+
+    def test_filename_is_sanitized(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            res = p.export_config(["home-01"], "../../etc/passwd")
+            self.assertNotIn("/", res["filename"])
+            self.assertEqual(res["filename"], "passwd.yaml")
+            self.assertTrue(res["filename"].endswith(".yaml"))
+
+    def test_chinese_filename_kept_readable(self):
+        # 清洗成下划线的话「拆分测试」会变成「_.yaml」，运维认不出是哪个文件。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            self.assertEqual(p.export_config(["home-01"], "拆分测试")["filename"], "拆分测试.yaml")
+            self.assertEqual(p.export_config(["home-01"], "台湾 01")["filename"], "台湾 01.yaml")
+
+    def test_filename_rejects_path_chars_and_keeps_extension(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            self.assertEqual(p.export_config(["home-01"], "a:b*c?")["filename"], "a_b_c.yaml")
+            self.assertEqual(p.export_config(["home-01"], "sub.yml")["filename"], "sub.yml")
+            self.assertEqual(p.export_config(["home-01"], "   ")["filename"], "mihomo-pool-export.yaml")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

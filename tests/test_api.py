@@ -72,6 +72,16 @@ class FakePool:
             raise m.ConfigError("YAML 解析失败")
         return self.source_meta
 
+    def export_config(self, names, filename=""):
+        if not names:
+            raise m.PoolError("至少选择一个节点")
+        if "nope" in names:
+            raise m.PoolError("源配置里没有这些节点: nope")
+        safe = (filename or "mihomo-pool-export").strip() or "mihomo-pool-export"
+        if not safe.endswith((".yaml", ".yml")):
+            safe += ".yaml"
+        return {"filename": safe, "content": "proxies: []\n", "count": len(names)}
+
 
 class TestApi(unittest.TestCase):
     httpd = None
@@ -233,6 +243,28 @@ class TestApi(unittest.TestCase):
     def test_history_restore_missing(self):
         code, _ = self.req("/api/v1/history/restore", "POST", json.dumps({"file": "../evil.yaml"}))
         self.assertEqual(code, 400)
+
+    def test_export_returns_config_and_filename(self):
+        code, data = self.req("/api/v1/nodes/export", "POST",
+                              json.dumps({"nodes": ["a", "b"], "filename": "sub"}))
+        self.assertEqual(code, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(data["filename"], "sub.yaml")
+        self.assertIn("proxies", data["content"])
+
+    def test_export_requires_nodes_array(self):
+        code, _ = self.req("/api/v1/nodes/export", "POST", json.dumps({"nodes": "a"}))
+        self.assertEqual(code, 400)
+
+    def test_export_empty_selection_maps_409(self):
+        code, _ = self.req("/api/v1/nodes/export", "POST", json.dumps({"nodes": []}))
+        self.assertEqual(code, 409)
+
+    def test_export_unknown_node_maps_409(self):
+        code, data = self.req("/api/v1/nodes/export", "POST", json.dumps({"nodes": ["nope"]}))
+        self.assertEqual(code, 409)
+        self.assertIn("nope", data["error"])
 
     def test_unknown_route_404(self):
         code, _ = self.req("/api/v1/nope")

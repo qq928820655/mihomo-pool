@@ -95,11 +95,13 @@ tr.node-disabled td:first-child{text-decoration:line-through}
       <button class="btn gray" onclick="loadNodes()">过滤</button>
       <label style="font-size:13px;color:var(--dim);white-space:nowrap"><input type="checkbox" id="only-ok" onchange="loadNodes()"> 只看可用</label>
       <button class="btn" onclick="testAll()">测速全部</button>
+      <button class="btn" onclick="exportSelected()" title="把勾选的节点拆成一份独立配置文件下载，供其他 pool 使用">导出所选配置</button>
+      <button class="btn gray" onclick="clearSelection()">清空勾选</button>
     </div>
     <div id="nodes-count" class="muted" style="font-size:12px;margin:4px 0"></div>
     <div style="max-height:62vh;overflow:auto">
-    <table><thead><tr id="nodes-head"><th data-k="name" onclick="setSort('name')">节点</th><th data-k="type" onclick="setSort('type')">类型</th><th data-k="delay_ms" onclick="setSort('delay_ms')">延迟</th><th data-k="qscore" onclick="setSort('qscore')">纯度</th><th data-k="listener_port" onclick="setSort('listener_port')">端口</th><th data-k="match" onclick="setSort('match')">门限</th><th></th></tr></thead>
-    <tbody id="nodes-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody></table>
+    <table><thead><tr id="nodes-head"><th style="width:34px"><input type="checkbox" id="sel-all" onclick="toggleAllNodes(this)" title="全选当前筛选结果"></th><th data-k="name" onclick="setSort('name')">节点</th><th data-k="type" onclick="setSort('type')">类型</th><th data-k="delay_ms" onclick="setSort('delay_ms')">延迟</th><th data-k="qscore" onclick="setSort('qscore')">纯度</th><th data-k="listener_port" onclick="setSort('listener_port')">端口</th><th data-k="match" onclick="setSort('match')">门限</th><th></th></tr></thead>
+    <tbody id="nodes-body"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody></table>
     </div>
   </div>
   <div class="page" id="p-import">
@@ -303,8 +305,55 @@ async function loadNodes(){
       ? `<button class="btn mini" onclick="toggleNode(this)" data-n="${esc(n.name)}" data-d="0">启用</button>`
       : `<button class="btn mini gray" onclick="toggleNode(this)" data-n="${esc(n.name)}" data-d="1">禁用</button>`;
     const fixedBtn=n.disabled?'':`<button class="btn mini" onclick="setFixed(this)" data-n="${esc(n.name)}">设为固定</button> <button class="btn mini" onclick="pinPort(this)" data-n="${esc(n.name)}" data-p="${n.listener_port??''}">钉端口</button> `;
-    return `<tr class="${n.disabled?'node-disabled':''}"><td>${nameCell}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${n.disabled?'—':qcell(n.quality)}</td><td>${n.listener_port??'—'}${n.pinned?' 📌':''}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td>${fixedBtn}${toggleBtn}</td></tr>`;
-  }).join(''):'<tr><td colspan="7" class="muted">'+(d.nodes.length?'没有匹配的节点':'没有节点')+'</td></tr>';
+    const ck=`<input type="checkbox" class="node-ck" data-n="${esc(n.name)}" ${SELECTED.has(n.name)?'checked':''} onchange="toggleSel(this)">`;
+    return `<tr class="${n.disabled?'node-disabled':''}"><td>${ck}</td><td>${nameCell}</td><td class="muted">${esc(n.type)}</td><td class="${dcls}">${dtxt}</td><td>${n.disabled?'—':qcell(n.quality)}</td><td>${n.listener_port??'—'}${n.pinned?' 📌':''}</td><td>${n.match?'<span class="badge on">命中</span>':'<span class="badge">—</span>'}</td><td>${fixedBtn}${toggleBtn}</td></tr>`;
+  }).join(''):'<tr><td colspan="8" class="muted">'+(d.nodes.length?'没有匹配的节点':'没有节点')+'</td></tr>';
+  syncSelAll();
+}
+// 勾选状态按节点名保存，不随筛选变化：筛一遍挑几个、再筛一遍挑几个，
+// 前面的选择不该因为换了关键词就丢掉。导出用的是这个集合。
+let SELECTED=new Set();
+function toggleSel(ck){
+  if(ck.checked)SELECTED.add(ck.dataset.n);else SELECTED.delete(ck.dataset.n);
+  syncSelAll();
+}
+function toggleAllNodes(box){
+  document.querySelectorAll('#nodes-body .node-ck').forEach(ck=>{
+    ck.checked=box.checked;
+    if(box.checked)SELECTED.add(ck.dataset.n);else SELECTED.delete(ck.dataset.n);
+  });
+  syncSelAll();
+}
+function syncSelAll(){
+  const all=[...document.querySelectorAll('#nodes-body .node-ck')];
+  const box=$('#sel-all');
+  if(box)box.checked=all.length>0&&all.every(ck=>ck.checked);
+  const cnt=SELECTED.size;
+  const btn=[...document.querySelectorAll('#p-nodes button')].find(b=>b.textContent.includes('导出所选配置'));
+  if(btn)btn.textContent=cnt?('导出所选配置 ('+cnt+')'):'导出所选配置';
+}
+function clearSelection(){
+  SELECTED.clear();
+  document.querySelectorAll('#nodes-body .node-ck').forEach(ck=>ck.checked=false);
+  syncSelAll();
+}
+// 导出的是「给别的 pool 用」的独立配置：只含勾选的 proxies + 一个选择组，
+// 不带本 pool 的监听端口和 HUB-* 组，避免导到别处撞端口或指向不存在的节点。
+async function exportSelected(){
+  if(!SELECTED.size)return toast('先勾选要导出的节点',1);
+  const nodes=[...SELECTED];
+  const stamp=new Date().toISOString().slice(0,10);
+  const filename='mihomo-pool-'+stamp+'-'+nodes.length+'nodes';
+  try{
+    const d=await api('/api/v1/nodes/export',{method:'POST',body:JSON.stringify({nodes,filename})});
+    const blob=new Blob([d.content],{type:'application/x-yaml'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=d.filename||'mihomo-pool-export.yaml';
+    document.body.appendChild(a);a.click();
+    setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},0);
+    toast('已导出 '+d.count+' 个节点 → '+d.filename);
+  }catch(e){toast(e.message,1)}
 }
 async function setFixed(btn){
   try{const d=await api('/api/v1/fixed',{method:'POST',body:JSON.stringify({node:btn.dataset.n})});toast('固定出口 → '+d.node);refresh()}catch(e){toast(e.message,1)}

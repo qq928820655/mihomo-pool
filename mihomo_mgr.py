@@ -1610,6 +1610,74 @@ class Pool:
             )
         return out
 
+    def export_config(self, names, filename="mihomo-pool-export"):
+        """Build a standalone config containing only the selected nodes.
+
+        The output is for *another* pool instance, not this one, so it must not
+        carry this pool's inbound listeners or HUB-* groups: importing them
+        elsewhere would collide on ports and re-point the other pool's groups
+        at names that do not exist there. What goes out is the selected
+        proxies, one select group and a MATCH rule.
+
+        ``names`` is the selection as shown on the panel. Unknown names are an
+        error rather than a silent skip: a typo would otherwise produce a
+        config that quietly lacks a node the operator asked for.
+        """
+        wanted = [str(n).strip() for n in (names or []) if str(n).strip()]
+        if not wanted:
+            raise PoolError("至少选择一个节点")
+        seen = []
+        for n in wanted:
+            if n not in seen:
+                seen.append(n)
+        try:
+            with open(self.source_path, "rb") as fh:
+                doc = yaml.safe_load(fh.read().decode("utf-8-sig", "replace"))
+        except FileNotFoundError:
+            raise PoolError("还没有导入配置") from None
+        except yaml.YAMLError as exc:
+            raise ConfigError("源配置不是有效的 yaml: %s" % str(exc).splitlines()[0]) from None
+        if not isinstance(doc, dict):
+            raise ConfigError("源配置根节点必须是映射")
+        proxies = doc.get("proxies")
+        if not isinstance(proxies, list):
+            proxies = []
+        by_name = {}
+        for item in proxies:
+            if isinstance(item, dict) and item.get("name"):
+                by_name.setdefault(str(item["name"]), item)
+        if not by_name and doc.get("proxy-providers"):
+            raise ConfigError(
+                "源配置的节点来自 proxy-providers，无法按节点拆分；"
+                "请先导入一份带显式 proxies 的配置"
+            )
+        missing = [n for n in seen if n not in by_name]
+        if missing:
+            shown = "、".join(missing[:5]) + ("…" if len(missing) > 5 else "")
+            raise PoolError("源配置里没有这些节点: %s" % shown)
+        picked = [by_name[n] for n in seen]
+        out = {
+            "mixed-port": 7890,
+            "allow-lan": True,
+            "mode": "rule",
+            "log-level": "info",
+            "proxies": picked,
+            "proxy-groups": [
+                {"name": "PROXY", "type": "select", "proxies": list(seen) + ["DIRECT"]}
+            ],
+            "rules": ["MATCH,PROXY"],
+        }
+        # 只剥路径分隔符与控制字符，中文名照原样保留：清洗成下划线的话
+        # 「拆分测试」会变成「_.yaml」，运维根本认不出哪个文件是哪个。
+        raw = str(filename or "").strip()
+        raw = os.path.basename(raw.replace("\\", "/"))
+        safe = re.sub(r'[\x00-\x1f/\\:*?"<>|]+', "_", raw).strip(" ._") or "mihomo-pool-export"
+        if not safe.endswith((".yaml", ".yml")):
+            safe += ".yaml"
+        text = yaml.safe_dump(out, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        self.log("export config: %d nodes (%s)" % (len(picked), safe))
+        return {"filename": safe, "content": text, "count": len(picked)}
+
     def hub_exits(self):
         """Port → node name for every port a hub slot can point at.
 
