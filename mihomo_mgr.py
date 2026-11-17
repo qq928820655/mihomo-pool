@@ -45,7 +45,13 @@ DEFAULT_SETTINGS = {
     "auto_test_s": 300,
     "ipq_enabled": 1,
     "ipq_ipapi_key": "",
+    # 逐节点端口数量。0 表示沿用 .env 的 MPOOL_LISTEN_MAX（默认 32）。
+    # 放在设置里是为了不改 .env、不重启就能扩容端口池。
+    "listen_max": 0,
 }
+
+# 端口数上限：listen_base 往后最多开到 65535，同时避免一次开几千个监听。
+LISTEN_MAX_LIMIT = 512
 
 
 _IPQ_KW = (
@@ -259,7 +265,9 @@ class Pool:
         self.singbox_bin = os.path.abspath(singbox_bin) if singbox_bin else os.path.join(os.path.dirname(os.path.abspath(bin_path)), "sing-box")
         self.controller_addr = controller_addr
         self.listen_base = int(listen_base)
-        self.listen_max = max(1, int(listen_max))
+        # env 值先存着，settings 里的 listen_max 覆盖它（见 _load_settings）。
+        self.env_listen_max = max(1, int(listen_max))
+        self.listen_max = self.env_listen_max
         self.hub_ports = tuple(int(p) for p in hub_ports) or (7890, 7891, 7892)
         self.ipq_port = int(ipq_port)
         self.log = log or (lambda msg: None)
@@ -267,11 +275,15 @@ class Pool:
         self.hist_dir = os.path.join(self.cfg_dir, "history")
         self.runtime_dir = os.path.join(self.root, "runtime")
         self.source_path = os.path.join(self.cfg_dir, "source.yaml")
+        # 多来源：每个配置文件/订阅单独存一份，合并后才写 source_path。
+        # source_path 仍是 mihomo 唯一读取的入口，reload 逻辑不用改。
+        self.sources_dir = os.path.join(self.cfg_dir, "sources")
+        self.sources_index_path = os.path.join(self.cfg_dir, "sources.json")
         self.runtime_path = os.path.join(self.runtime_dir, "config.yaml")
         self.settings_path = os.path.join(self.runtime_dir, "settings.json")
         self.secret_path = os.path.join(self.runtime_dir, "secret")
         self.local_path = os.path.join(self.runtime_dir, "local.json")
-        for d in (self.cfg_dir, self.hist_dir, self.runtime_dir):
+        for d in (self.cfg_dir, self.hist_dir, self.runtime_dir, self.sources_dir):
             os.makedirs(d, exist_ok=True)
         self.settings = dict(DEFAULT_SETTINGS)
         self._load_settings()
@@ -299,6 +311,8 @@ class Pool:
         self.runtime_ok = False
         self.last_error = ""
         self.source_meta = self._scan_source_meta()
+        self.sources = self._load_sources()
+        self.source_groups = []
         self._lock = threading.RLock()
         self._rot_stop = threading.Event()
         self._rot_thread = None
@@ -943,6 +957,18 @@ class Pool:
                         self.settings[key] = data[key]
         except (OSError, ValueError):
             pass
+        self._apply_listen_max()
+
+    def _apply_listen_max(self):
+        """settings.listen_max 覆盖 env 的端口数；0 表示用 env 值。"""
+        try:
+            want = int(self.settings.get("listen_max") or 0)
+        except (TypeError, ValueError):
+            want = 0
+        # env_listen_max 只在完整构造时有；单元测试用 __new__ 造对象会缺，
+        # 这时退回当前 listen_max，别把测试路径搞崩。
+        fallback = getattr(self, "env_listen_max", None) or getattr(self, "listen_max", 32) or 32
+        self.listen_max = max(1, min(LISTEN_MAX_LIMIT, want)) if want > 0 else fallback
 
     def save_settings(self):
         tmp = self.settings_path + ".tmp"
@@ -988,8 +1014,18 @@ class Pool:
                 clean["fixed_node"] = str(patch["fixed_node"] or "").strip()
             if "node_name" in patch:
                 clean["node_name"] = str(patch["node_name"] or "").strip()[:60]
+            if "listen_max" in patch:
+                try:
+                    val = int(patch["listen_max"])
+                except (TypeError, ValueError):
+                    raise PoolError("listen_max 需为整数") from None
+                if val != 0 and not 1 <= val <= LISTEN_MAX_LIMIT:
+                    raise PoolError("listen_max 需在 1-%d 之间（0=沿用环境变量）" % LISTEN_MAX_LIMIT)
+                clean["listen_max"] = val
             self.settings.update(clean)
             self.save_settings()
+            if "listen_max" in clean:
+                self._apply_listen_max()
             return dict(self.settings)
 
     def _scan_source_meta(self):
@@ -1035,6 +1071,329 @@ class Pool:
         self.source_meta = meta
         self.log("config imported: %s (%d bytes)" % (name, len(data)))
         return meta
+
+    # ---------- 多来源 ----------
+    # 每个配置文件/订阅单独存成 configs/sources/<id>.yaml，索引在
+    # configs/sources.json。合并结果写回 source_path，reload() 不用改。
+
+    def _load_sources(self):
+        try:
+            with open(self.sources_index_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [s for s in data if isinstance(s, dict) and s.get("id")]
+
+    def _save_sources(self):
+        tmp = self.sources_index_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.sources, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.sources_index_path)
+
+    def _source_file(self, source_id):
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(source_id or "")) or "source"
+        return os.path.join(self.sources_dir, safe + ".yaml")
+
+    def _find_source(self, source_id):
+        for s in self.sources:
+            if s.get("id") == source_id:
+                return s
+        return None
+
+    def _new_source_id(self, name):
+        base = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "")).strip("-._").lower() or "source"
+        # 去掉扩展名：_source_file() 会再补 .yaml，否则得到 x.yaml.yaml。
+        base = re.sub(r"\.(yaml|yml)$", "", base) or "source"
+        base = base[:40]
+        taken = {s.get("id") for s in self.sources}
+        if base not in taken:
+            return base
+        n = 2
+        while "%s-%d" % (base, n) in taken:
+            n += 1
+        return "%s-%d" % (base, n)
+
+    def _ensure_sources_migrated(self):
+        """把老的单一 source.yaml 收编成一个来源，旧部署升级后不丢配置。"""
+        if self.sources:
+            return
+        if not os.path.exists(self.source_path):
+            return
+        with open(self.source_path, "rb") as fh:
+            data = fh.read()
+        if not data.strip():
+            return
+        try:
+            self.add_source(data, "source.yaml", url="", merge=False)
+        except PoolError:
+            return
+
+    @staticmethod
+    def node_fingerprint(node):
+        """节点去重指纹：除 name 外的全部字段。
+
+        同一个机场换条订阅地址，节点内容一模一样、名字可能带序号变化；
+        按内容比对才能认出来是同一个节点，避免端口和列表里出现两份。
+        """
+        if not isinstance(node, dict):
+            return ""
+        payload = {k: v for k, v in node.items() if k != "name"}
+        try:
+            blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            blob = str(sorted((str(k), str(v)) for k, v in payload.items()))
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    def add_source(self, data, name="upload.yaml", url="", source_id=None, merge=True):
+        """导入一个配置文件/订阅作为一个来源。
+
+        重复导入是「更新」而不是「新增」：先按 URL 命中，再按内容 sha256
+        命中。每天刷新的订阅因此只占一条记录，不会越积越多。
+        """
+        text = data.decode("utf-8-sig", "replace")
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise ConfigError("YAML 解析失败: %s" % str(exc).splitlines()[0]) from None
+        if not isinstance(doc, dict):
+            raise ConfigError("配置根节点必须是映射")
+        proxies = doc.get("proxies")
+        if proxies is not None and not isinstance(proxies, list):
+            raise ConfigError("proxies 必须是列表")
+        if not proxies and not doc.get("proxy-providers"):
+            raise ConfigError("配置里没有 proxies 或 proxy-providers")
+        for item in proxies or []:
+            if not isinstance(item, dict) or not item.get("name") or not item.get("type"):
+                raise ConfigError("proxies 里存在缺少 name/type 的条目")
+
+        sha = hashlib.sha256(data).hexdigest()
+        target = self._find_source(source_id) if source_id else None
+        if target is None and url:
+            target = next((s for s in self.sources if s.get("url") == url), None)
+        if target is None:
+            target = next((s for s in self.sources if s.get("sha256") == sha), None)
+        action = "updated" if target is not None else "added"
+        if target is None:
+            target = {
+                "id": self._new_source_id(name),
+                "name": name,
+                "url": url,
+                "enabled": True,
+                "order": len(self.sources),
+            }
+            self.sources.append(target)
+        else:
+            if url and not target.get("url"):
+                target["url"] = url
+            if name and name != "upload.yaml":
+                target["name"] = name
+        meta = self._source_meta(data, name)
+        target.update({
+            "sha256": sha,
+            "sha256_short": meta["sha256"],
+            "size": len(data),
+            "imported_at": meta["imported_at"],
+            "nodes": len(proxies or []),
+        })
+        with open(self._source_file(target["id"]), "wb") as fh:
+            fh.write(data)
+        # 留档：来源文件每次导入都进 history，可回溯
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "upload.yaml"
+        with open(os.path.join(self.hist_dir, "%s-%s" % (stamp, safe)), "wb") as fh:
+            fh.write(data)
+        self._save_sources()
+        self.log("source %s: %s (%d bytes, %d nodes)" % (action, target["id"], len(data), len(proxies or [])))
+        if merge:
+            self.rebuild_source()
+        return {"source": dict(target), "action": action}
+
+    def remove_source(self, source_id):
+        target = self._find_source(source_id)
+        if target is None:
+            raise PoolError("来源不存在: %s" % source_id)
+        self.sources.remove(target)
+        try:
+            os.remove(self._source_file(target["id"]))
+        except OSError:
+            pass
+        self._save_sources()
+        self.rebuild_source()
+        return {"removed": source_id, "remaining": len(self.sources)}
+
+    def set_source_enabled(self, source_id, enabled):
+        target = self._find_source(source_id)
+        if target is None:
+            raise PoolError("来源不存在: %s" % source_id)
+        target["enabled"] = bool(enabled)
+        self._save_sources()
+        self.rebuild_source()
+        return {"source": dict(target)}
+
+    def sources_view(self):
+        """面板用的来源列表。
+
+        ``node_count`` 是来源里的节点数，``alive_count`` 是实测有延迟结果的
+        数量——按「已载入」算会把死节点也报成存活，运维据此判断该不该停用
+        一个来源就会判断错。
+        """
+        loaded = set(getattr(self, "node_list", []))
+        # 内存缓存是本次进程内的实测结果；进程刚起来时它是空的，此时退回
+        # 上次落盘的延迟记录，否则面板会显示「存活 0」而节点其实好好的。
+        fresh = self.cache.fresh(self.settings.get("ttl_s", 30)) or self.cache.all()
+        persisted = getattr(self, "last_delays", None) or {}
+        out = []
+        for s in self.sources:
+            item = dict(s)
+            names = self._source_node_names(s)
+            item["node_count"] = len(names)
+            item["loaded_count"] = len([n for n in names if n in loaded])
+            # last_delays 的约定：整数=测通延迟，'x'=测过但超时。
+            # 只有整数才算存活，否则超时节点也会被算进「存活」。
+            alive = [n for n in names
+                     if isinstance(fresh.get(n), int) or isinstance(persisted.get(n), int)]
+            item["alive_count"] = len(alive)
+            item["tested"] = bool(alive) or any(n in fresh for n in names)
+            out.append(item)
+        return out
+
+    def _source_doc(self, src):
+        try:
+            with open(self._source_file(src.get("id")), "rb") as fh:
+                return yaml.safe_load(fh.read().decode("utf-8-sig", "replace"))
+        except (OSError, yaml.YAMLError):
+            return None
+
+    def _source_node_names(self, src):
+        doc = self._source_doc(src)
+        if not isinstance(doc, dict):
+            return []
+        return [str(p.get("name")) for p in (doc.get("proxies") or [])
+                if isinstance(p, dict) and p.get("name")]
+
+    def rebuild_source(self):
+        """把所有启用来源合并成 source.yaml。
+
+        · 节点按内容指纹去重，同一节点只保留第一次出现的名字；
+        · 每个来源生成一个 `[来源] 名称` 分组，便于快速切换与批量启停；
+        · 再生成一个 `汇总出口` 分组，装全部存活节点；
+        · 规则原样保留，但目标已不存在的规则会被剔除，避免整份配置加载失败。
+        """
+        enabled = [s for s in self.sources if s.get("enabled", True)]
+        merged = {
+            "allow-lan": True,
+            "mode": "rule",
+            "log-level": "info",
+            "proxies": [],
+            "proxy-groups": [],
+            "rules": [],
+        }
+        seen_fp = {}
+        seen_names = set()
+        per_source = []
+        valid_targets = set()
+        carried_groups = []
+        carried_rules = []
+        for src in sorted(enabled, key=lambda s: (s.get("order", 0), str(s.get("id")))):
+            doc = self._source_doc(src)
+            if not isinstance(doc, dict):
+                continue
+            names = []
+            for p in doc.get("proxies") or []:
+                if not isinstance(p, dict) or not p.get("name") or not p.get("type"):
+                    continue
+                name = str(p["name"])
+                fp = self.node_fingerprint(p)
+                if fp in seen_fp:
+                    continue
+                if name in seen_names:
+                    continue
+                merged["proxies"].append(p)
+                seen_fp[fp] = name
+                seen_names.add(name)
+                names.append(name)
+            if not names:
+                continue
+            group_name = "[来源] %s" % (src.get("name") or src.get("id"))
+            base = group_name
+            n = 2
+            while group_name in seen_names:
+                group_name = "%s (%d)" % (base, n)
+                n += 1
+            merged["proxy-groups"].append({
+                "name": group_name, "type": "select", "proxies": names + ["DIRECT"],
+            })
+            seen_names.add(group_name)
+            valid_targets.add(group_name)
+            per_source.append({"id": src.get("id"), "name": src.get("name"), "group": group_name, "nodes": names})
+            for g in doc.get("proxy-groups") or []:
+                if isinstance(g, dict) and g.get("name"):
+                    carried_groups.append(g)
+            carried_rules.extend(doc.get("rules") or [])
+        if not merged["proxies"]:
+            raise ConfigError("所有来源都没有可用节点（或都已停用）")
+        valid_targets.update(seen_names)
+        valid_targets.update(SPECIAL_PROXIES)
+        # 汇总出口：全部节点，运维从一个组里挑
+        all_names = [str(p["name"]) for p in merged["proxies"]]
+        merged["proxy-groups"].append({
+            "name": "汇总出口", "type": "select", "proxies": all_names + ["DIRECT"],
+        })
+        valid_targets.add("汇总出口")
+        # 来源自带的组：成员过滤到存活名字，空了就丢
+        for g in carried_groups:
+            gname = str(g.get("name"))
+            if gname in seen_names:
+                continue
+            members = [m for m in (g.get("proxies") or []) if isinstance(m, str) and (m in valid_targets or m in seen_names)]
+            if not members:
+                continue
+            item = dict(g)
+            item["proxies"] = members
+            merged["proxy-groups"].append(item)
+            seen_names.add(gname)
+            valid_targets.add(gname)
+        # 规则：目标不存在的丢弃，末尾保证有 MATCH
+        out_rules = []
+        for r in carried_rules:
+            if not isinstance(r, str) or not r.strip():
+                continue
+            target = r.rsplit(",", 1)[-1].strip()
+            if "," not in r:
+                continue
+            if target not in valid_targets:
+                continue
+            if r not in out_rules:
+                out_rules.append(r)
+        if not any(r.upper().startswith("MATCH,") for r in out_rules):
+            out_rules.append("MATCH,汇总出口")
+        merged["rules"] = out_rules
+        text = yaml.safe_dump(merged, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        with open(self.source_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        self.source_meta = {
+            "name": "合并 %d 个来源" % len(per_source),
+            "size": len(text.encode("utf-8")),
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+            "imported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.source_groups = per_source
+        self.log("merge sources: %d sources -> %d nodes" % (len(per_source), len(all_names)))
+        return {"sources": len(per_source), "nodes": len(all_names), "groups": per_source}
+
+    def set_nodes_disabled(self, names, disabled):
+        """批量启用/停用节点，只写一次盘，由调用方统一 reload。"""
+        names = [str(n).strip() for n in (names or []) if str(n).strip()]
+        if not names:
+            raise PoolError("至少选择一个节点")
+        if disabled:
+            self.disabled_nodes.update(names)
+        else:
+            self.disabled_nodes.difference_update(names)
+        self._save_disabled()
+        return {"changed": len(names), "disabled": bool(disabled)}
 
     def _hub_listeners(self):
         return [
@@ -1095,6 +1454,40 @@ class Pool:
                 members = g.get("proxies")
                 if isinstance(members, list):
                     g["proxies"] = [m for m in members if str(m) not in self.disabled_nodes]
+            # 成员被剔空的组必须删掉：mihomo 对「proxies 为空且没有 use」
+            # 的组直接拒绝整份配置（proxy group[N]: `use` or `proxies`
+            # missing），只剔成员不删组会让一次批量禁用把网关打挂。
+            kept_groups = []
+            for g in groups:
+                if not isinstance(g, dict):
+                    kept_groups.append(g)
+                    continue
+                if g.get("use"):
+                    kept_groups.append(g)
+                    continue
+                members = g.get("proxies")
+                if isinstance(members, list) and not members:
+                    continue
+                kept_groups.append(g)
+            doc["proxy-groups"] = kept_groups
+            # 组被删掉后，指向它的规则会变成「proxy [X] not found」，
+            # mihomo 同样拒绝整份配置。这类规则只能一并剔除，流量落回
+            # 末尾的 MATCH（走代理出口），而不是悄悄改走 DIRECT。
+            valid = set()
+            for p in doc.get("proxies") or []:
+                if isinstance(p, dict) and p.get("name"):
+                    valid.add(str(p["name"]))
+            for g in kept_groups:
+                if isinstance(g, dict) and g.get("name"):
+                    valid.add(str(g["name"]))
+            valid.update(SPECIAL_PROXIES)
+            rules = doc.get("rules")
+            if isinstance(rules, list):
+                doc["rules"] = [
+                    r for r in rules
+                    if isinstance(r, str) and "," in r
+                    and r.rsplit(",", 1)[-1].strip() in valid
+                ]
         return dropped
 
     def _phase2_doc(self, doc, names):
@@ -1211,6 +1604,11 @@ class Pool:
                 raise ConfigError(str(exc)) from None
 
     def startup(self):
+        # 老部署只有单个 source.yaml，先收编成一个来源，面板才能列出来。
+        try:
+            self._ensure_sources_migrated()
+        except Exception as exc:  # 迁移失败不该拦住启动
+            self.log("source migration skipped: %r" % (exc,))
         if self._controller_alive():
             self.log("adopt existing mihomo on %s" % self.controller_addr)
             try:
@@ -1573,9 +1971,18 @@ class Pool:
             port = 7892
         return {"node": node, "port": port, "sticky": False}
 
+    def node_source_map(self):
+        """节点名 → 来源名。面板按来源筛选用。"""
+        out = {}
+        for src in getattr(self, "sources", None) or []:
+            for name in self._source_node_names(src):
+                out.setdefault(name, src.get("name") or src.get("id") or "")
+        return out
+
     def nodes_view(self, keywords=""):
         fresh = self.cache.fresh(self.settings["ttl_s"]) or self.cache.all()
         kw = keywords if keywords else self.settings["keywords"]
+        src_map = self.node_source_map()
         out = []
         for name in self.node_list:
             out.append(
@@ -1588,6 +1995,7 @@ class Pool:
                     "pinned": name in self.port_pins,
                     "quality": self.node_quality.get(name),
                     "disabled": False,
+                    "source": src_map.get(name, ""),
                     "match": keywords_match(name, kw),
                 }
             )
@@ -1605,6 +2013,7 @@ class Pool:
                     "pinned": False,
                     "quality": None,
                     "disabled": True,
+                    "source": src_map.get(name, ""),
                     "match": keywords_match(name, kw),
                 }
             )

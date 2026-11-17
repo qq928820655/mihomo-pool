@@ -346,6 +346,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(404, "not found")
             if not self._authed(query):
                 return self._error(401, "token 无效")
+            if path == "/api/v1/auth":
+                # 登录校验：能走到这里就说明 token 已通过，返回面板基本信息。
+                # 面板用它做进入前的门禁，避免输错了还进得去、页面到处报错。
+                return self._json(200, {"ok": True, "auth_required": bool(TOKEN),
+                                        "nodes": len(POOL.node_list)})
             return self._route_get(path, query)
         except mgr_mod.PoolError as exc:
             return self._error(409, exc)
@@ -401,6 +406,8 @@ class Handler(BaseHTTPRequestHandler):
                 fp = os.path.join(hist_dir, name)
                 history.append({"file": name, "size": os.path.getsize(fp)})
             return self._json(200, {"ok": True, "source": POOL.source_meta, "runtime_ok": POOL.runtime_ok, "last_error": POOL.last_error, "history": history})
+        if path == "/api/v1/sources":
+            return self._json(200, {"ok": True, "sources": POOL.sources_view()})
         return self._error(404, "not found")
 
     def _route_post(self, path, query):
@@ -440,7 +447,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, **res})
         if path == "/api/v1/settings":
             body = self._json_body()
+            before = POOL.listen_max
             settings = POOL.update_settings(body)
+            # 端口数变了要重载才会重新分配逐节点端口，否则新配额要等下一次
+            # 手动重载才生效，面板上的端口数看起来「改了没反应」。
+            if POOL.listen_max != before:
+                try:
+                    reload_res = POOL.reload()
+                except Exception as exc:
+                    return self._json(200, {"ok": False, "settings": settings,
+                                            "error": "端口数已保存但重载失败: %s" % exc})
+                return self._json(200, {"ok": True, "settings": settings,
+                                        "reload": reload_res})
             return self._json(200, {"ok": True, "settings": settings})
         if path == "/api/v1/reload":
             res = POOL.reload()
@@ -456,18 +474,18 @@ class Handler(BaseHTTPRequestHandler):
             data = self._body()
             if not data:
                 return self._error(400, "请求体为空")
-            meta = POOL.import_source(data, name)
+            res = POOL.add_source(data, name)
             reload_res = POOL.reload()
-            return self._json(200, {"ok": True, "source": meta, "reload": reload_res})
+            return self._json(200, {"ok": True, **res, "reload": reload_res})
         if path == "/api/v1/config/paste":
             body = self._json_body()
             content = str(body.get("content") or "")
             if not content.strip():
                 return self._error(400, "内容为空")
             name = str(body.get("name") or "paste.yaml")
-            meta = POOL.import_source(content.encode("utf-8"), name)
+            res = POOL.add_source(content.encode("utf-8"), name)
             reload_res = POOL.reload()
-            return self._json(200, {"ok": True, "source": meta, "reload": reload_res})
+            return self._json(200, {"ok": True, **res, "reload": reload_res})
         if path == "/api/v1/config/import_url":
             body = self._json_body()
             url = str(body.get("url") or "").strip()
@@ -479,9 +497,9 @@ class Handler(BaseHTTPRequestHandler):
             if len(data) > MAX_IMPORT_BYTES:
                 return self._error(400, "配置超过 10MB")
             name = os.path.basename(urllib.parse.urlsplit(url).path) or "subscription.yaml"
-            meta = POOL.import_source(data, name)
+            res = POOL.add_source(data, name, url=url)
             reload_res = POOL.reload()
-            return self._json(200, {"ok": True, "source": meta, "reload": reload_res})
+            return self._json(200, {"ok": True, **res, "reload": reload_res})
         if path == "/api/v1/config/import_path":
             body = self._json_body()
             fp = os.path.abspath(str(body.get("path") or ""))
@@ -491,9 +509,31 @@ class Handler(BaseHTTPRequestHandler):
                 data = fh.read(MAX_IMPORT_BYTES + 1)
             if len(data) > MAX_IMPORT_BYTES:
                 return self._error(400, "配置超过 10MB")
-            meta = POOL.import_source(data, os.path.basename(fp))
+            res = POOL.add_source(data, os.path.basename(fp))
             reload_res = POOL.reload()
-            return self._json(200, {"ok": True, "source": meta, "reload": reload_res})
+            return self._json(200, {"ok": True, **res, "reload": reload_res})
+        if path == "/api/v1/sources/remove":
+            body = self._json_body()
+            res = POOL.remove_source(str(body.get("id") or ""))
+            reload_res = POOL.reload()
+            return self._json(200, {"ok": True, **res, "reload": reload_res})
+        if path == "/api/v1/sources/toggle":
+            body = self._json_body()
+            res = POOL.set_source_enabled(str(body.get("id") or ""), bool(body.get("enabled", True)))
+            reload_res = POOL.reload()
+            return self._json(200, {"ok": True, **res, "reload": reload_res})
+        if path == "/api/v1/sources/refresh":
+            body = self._json_body()
+            return self._refresh_sources(body.get("id"))
+        if path == "/api/v1/nodes/bulk":
+            body = self._json_body()
+            names = body.get("nodes") or []
+            if not isinstance(names, list):
+                return self._error(400, "nodes 需为数组")
+            disabled = bool(body.get("disabled", True))
+            res = POOL.set_nodes_disabled(names, disabled)
+            reload_res = POOL.reload()
+            return self._json(200, {"ok": True, **res, "reload": reload_res})
         if path == "/api/v1/nodes/export":
             body = self._json_body()
             nodes = body.get("nodes")
@@ -509,10 +549,48 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "历史文件不存在")
             with open(fp, "rb") as fh:
                 data = fh.read()
-            meta = POOL.import_source(data, name)
+            res = POOL.add_source(data, name)
             reload_res = POOL.reload()
-            return self._json(200, {"ok": True, "source": meta, "reload": reload_res})
+            return self._json(200, {"ok": True, **res, "reload": reload_res})
         return self._error(404, "not found")
+
+    def _refresh_sources(self, source_id=None):
+        """按保存的订阅地址重新拉取。
+
+        只刷新有 URL 的来源；没有 URL 的（上传文件/粘贴文本）保持原样，
+        它们的更新方式就是重新导入。
+        """
+        targets = [s for s in POOL.sources if s.get("url")]
+        if source_id:
+            targets = [s for s in targets if s.get("id") == source_id]
+            if not targets:
+                return self._error(400, "该来源没有订阅地址，无法刷新")
+        if not targets:
+            return self._error(400, "没有带订阅地址的来源")
+        results = []
+        for src in targets:
+            try:
+                req = urllib.request.Request(
+                    src["url"], headers={"User-Agent": "clash.meta/mihomo-pool"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = resp.read(MAX_IMPORT_BYTES + 1)
+                if len(data) > MAX_IMPORT_BYTES:
+                    raise ValueError("配置超过 10MB")
+                res = POOL.add_source(data, src.get("name") or "subscription.yaml",
+                                      url=src["url"], source_id=src["id"], merge=False)
+                results.append({"id": src["id"], "ok": True,
+                                "nodes": res["source"].get("nodes"), "action": res["action"]})
+            except Exception as exc:
+                results.append({"id": src["id"], "ok": False, "error": str(exc)[:200]})
+        ok = [r for r in results if r["ok"]]
+        reload_res = None
+        if ok:
+            try:
+                reload_res = POOL.reload()
+            except Exception as exc:
+                return self._json(200, {"ok": False, "error": "刷新后重载失败: %s" % exc,
+                                        "results": results})
+        return self._json(200, {"ok": True, "results": results, "reload": reload_res})
 
 
 def main():

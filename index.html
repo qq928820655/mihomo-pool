@@ -53,10 +53,22 @@ tr.node-disabled td:first-child{text-decoration:line-through}
 </style>
 </head>
 <body>
+<div id="login" style="position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:99">
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px 30px;width:min(380px,90vw)">
+    <div style="font-size:17px;font-weight:600;margin-bottom:4px">mihomo-pool</div>
+    <div class="muted" style="font-size:12px;margin-bottom:18px">输入 API Token 进入面板</div>
+    <input id="login-token" type="password" placeholder="API Token" autocomplete="current-password"
+           style="width:100%;margin-bottom:10px"
+           onkeydown="if(event.key==='Enter')doLogin()">
+    <div id="login-msg" class="err" style="font-size:12px;min-height:18px;margin-bottom:10px"></div>
+    <button class="btn" style="width:100%" id="login-btn" onclick="doLogin()">进入面板</button>
+    <div class="muted" style="font-size:11px;margin-top:14px">Token 见服务器 .env 的 MPOOL_TOKEN</div>
+  </div>
+</div>
 <header>
   <span><span class="dot" id="dot"></span><b>mihomo-pool</b> <span class="ver" id="ver"></span> <span class="ver" id="pver" title="面板版本（git 提交 + 日期）；与上面的 mihomo 内核版本无关"></span></span>
   <span style="flex:1"></span>
-  <input id="token" type="password" placeholder="API Token" title="只需输入一次，自动保存在浏览器本地" style="width:180px" oninput="localStorage.setItem('mpool_token',this.value)">
+  <button class="btn mini gray" onclick="logout()" title="清除本机保存的 Token">退出</button>
 </header>
 <nav id="nav">
   <button data-p="home" class="act">概览</button>
@@ -96,7 +108,16 @@ tr.node-disabled td:first-child{text-decoration:line-through}
       <label style="font-size:13px;color:var(--dim);white-space:nowrap"><input type="checkbox" id="only-ok" onchange="loadNodes()"> 只看可用</label>
       <button class="btn" onclick="testAll()">测速全部</button>
       <button class="btn" onclick="exportSelected()" title="把勾选的节点拆成一份独立配置文件下载，供其他 pool 使用">导出所选配置</button>
+      <button class="btn gray" onclick="bulkToggle(true)" title="批量禁用勾选的节点">批量禁用</button>
+      <button class="btn gray" onclick="bulkToggle(false)" title="批量启用勾选的节点">批量启用</button>
       <button class="btn gray" onclick="clearSelection()">清空勾选</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <label style="font-size:13px;color:var(--dim);white-space:nowrap">按来源</label>
+      <select id="src-filter" onchange="loadNodes()" style="min-width:200px">
+        <option value="">全部来源</option>
+      </select>
+      <span id="src-filter-info" class="muted" style="font-size:12px"></span>
     </div>
     <div id="nodes-count" class="muted" style="font-size:12px;margin:4px 0"></div>
     <div style="max-height:62vh;overflow:auto">
@@ -105,9 +126,18 @@ tr.node-disabled td:first-child{text-decoration:line-through}
     </div>
   </div>
   <div class="page" id="p-import">
+    <div class="box"><h3>配置来源（可叠加多个）</h3>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn gray" onclick="loadSources()">刷新列表</button>
+        <button class="btn gray" onclick="refreshSources()">刷新全部订阅</button>
+        <span class="muted" style="font-size:12px">同一订阅地址或同一份内容重复导入会更新原来源，不会新增重复节点。</span>
+      </div>
+      <table><thead><tr><th>来源</th><th>节点</th><th>存活</th><th>订阅地址</th><th>导入时间</th><th></th></tr></thead>
+      <tbody id="src-list"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody></table>
+    </div>
     <div class="box"><h3>① URL 订阅导入</h3>
       <div class="row"><input id="imp-url" placeholder="https://.../config.yaml" style="flex:1;min-width:240px"><button class="btn" onclick="impUrl()">导入并重载</button></div>
-      <div class="hint">拉取远端 Clash/mihomo 配置（≤10MB），保存为 source.yaml 后自动注入 HUB 组与监听端口并热重载。</div>
+      <div class="hint">拉取远端 Clash/mihomo 配置（≤10MB）作为独立来源，与其他来源合并后热重载。</div>
     </div>
     <div class="box"><h3>② 上传文件</h3>
       <div class="row"><input type="file" id="imp-file" accept=".yaml,.yml,.txt" style="color:var(--dim)"><button class="btn" onclick="impFile()">导入并重载</button></div>
@@ -134,6 +164,7 @@ tr.node-disabled td:first-child{text-decoration:line-through}
         <label class="f">缓存有效期 ttl_s（测速结果缓存秒数）<input type="number" id="s-ttl" min="5" max="600"></label>
         <label class="f">自动测速间隔 auto_test_s（服务器后台定时测全部节点，0=关闭）<input type="number" id="s-auto" min="0" max="86400"></label>
         <label class="f">IP 质量检测（对有端口的节点查 ip-api 免费源，纯度高的优先分配端口）<select id="s-ipq"><option value="1">开启</option><option value="0">关闭</option></select></label>
+        <label class="f">逐节点端口数量 listen_max（默认 32，节点多时可调大；0=沿用 .env 的 MPOOL_LISTEN_MAX）<input type="number" id="s-lmax" min="0" max="512" placeholder="32"></label>
         <label class="f">测速 URL<input id="s-url"></label>
       </div>
       <div class="row"><button class="btn" onclick="saveSettings()">保存设置</button><span id="set-msg" class="muted"></span></div>
@@ -145,7 +176,7 @@ tr.node-disabled td:first-child{text-decoration:line-through}
         7892 分配出口：调用 API 传入 key（如账号 ID），同一 key 稳定映射到同一节点。<br>
         17901+ 逐节点端口：每个节点一个独享端口，供 CPA/Hub 按端口绑定账号（自动发现前 10 个）。<br>
         自动测速：服务器后台每 auto_test_s 秒自动测全部节点并更新缓存，7891 轮换 / 7892 分配 / API 挑选都会自动避开超时节点。<br>
-        后台独立性：轮换与自动测速都在服务器进程里跑，关闭网页完全不影响；API Token 只用于打开本面板，保存在浏览器本地，输入一次即可。<br>
+        后台独立性：轮换与自动测速都在服务器进程里跑，关闭网页完全不影响；打开面板需先输入 API Token（`.env` 的 `MPOOL_TOKEN`），校验通过才进入，Token 错误会当场提示，通过后保存在浏览器本地、刷新免输，右上角「退出」可清除。<br>
         节点「超时」是服务器视角：部分机场入口（CDN 类）会拒绝机房 IP 的 TLS 握手（家里住宅 IP 正常），这类节点从服务器永远不通，属来源 IP 选择性，非配置问题。<br>
         纯度分：每轮测速后对有端口的节点探测出口 IP 并查 ip-api（免费源），机房 -35、代理 -25、移动 +5；分配端口时按「纯度高优先、同纯度延迟低优先」排序。
         端口可在 .env 用 MPOOL_HUB_PORTS=7890,7891,7892 自定义（改后重启服务生效）。
@@ -191,8 +222,51 @@ tr.node-disabled td:first-child{text-decoration:line-through}
 <div id="toast"></div>
 <script>
 const $=s=>document.querySelector(s);
-function token(){return $('#token').value||localStorage.getItem('mpool_token')||''}
-$('#token').value=token();
+function token(){return localStorage.getItem('mpool_token')||''}
+// 进入面板前先验一次 token：输错了当场提示，而不是进去了满屏报错。
+// 校验通过才把 token 落本地并隐藏登录层；面板所有请求都从这里取 token。
+async function doLogin(){
+  const inp=$('#login-token'), msg=$('#login-msg'), btn=$('#login-btn');
+  const val=(inp.value||'').trim();
+  if(!val){msg.textContent='请输入 Token';return}
+  btn.disabled=true; msg.textContent=''; msg.className='muted';
+  try{
+    const r=await fetch('/api/v1/auth',{headers:{'X-Token':val}});
+    if(r.status===401){msg.className='err';msg.textContent='Token 错误，请检查 .env 里的 MPOOL_TOKEN';return}
+    if(!r.ok){msg.className='err';msg.textContent='服务异常（HTTP '+r.status+'）';return}
+    localStorage.setItem('mpool_token',val);
+    msg.className='ok'; msg.textContent='验证通过，正在进入…';
+    await enterPanel();
+  }catch(e){
+    msg.className='err'; msg.textContent='连接失败：'+e.message;
+  }finally{btn.disabled=false}
+}
+function logout(){
+  localStorage.removeItem('mpool_token');
+  $('#login').style.display='flex';
+  $('#login-token').value='';
+  $('#login-msg').textContent='';
+  $('#login-msg').className='err';
+}
+async function enterPanel(){
+  $('#login').style.display='none';
+  try{await refresh()}catch(e){}
+  loadNodes().catch(()=>{});
+}
+// 启动：有本地 token 就先验一次，通过直接进；失败则留在登录页。
+(async function boot(){
+  const saved=localStorage.getItem('mpool_token')||'';
+  if(saved){
+    $('#login-token').value=saved;
+    try{
+      const r=await fetch('/api/v1/auth',{headers:{'X-Token':saved}});
+      if(r.ok){await enterPanel();return}
+      if(r.status===401){localStorage.removeItem('mpool_token');
+        $('#login-msg').textContent='已保存的 Token 已失效，请重新输入';}
+    }catch(e){}
+  }
+  $('#login').style.display='flex';
+})();
 async function api(path,opt={}){
   const r=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-Token':token(),...(opt.headers||{})}});
   let d={};try{d=await r.json()}catch(e){}
@@ -205,12 +279,10 @@ document.getElementById('nav').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
   document.querySelectorAll('#nav button').forEach(x=>x.classList.toggle('act',x===b));
   document.querySelectorAll('.page').forEach(p=>p.classList.toggle('act',p.id==='p-'+b.dataset.p));
-  if(b.dataset.p==='nodes')loadNodes().catch(()=>{});
-  if(b.dataset.p==='import')loadHistory();
+  if(b.dataset.p==='nodes'){loadSources();loadNodes().catch(()=>{});}
+  if(b.dataset.p==='import'){loadHistory();loadSources();}
   if(b.dataset.p==='local')loadLocal();
 });
-$('#token').addEventListener('change',()=>{refresh().catch(()=>{});loadNodes().catch(()=>{})});
-$('#token').value=localStorage.getItem('mpool_token')||'';
 let STATUS={};
 async function refresh(){
   try{
@@ -236,7 +308,7 @@ async function refresh(){
     if(s.source){$('#src-box').style.display='block';$('#src-info').textContent=`${s.source.name} · ${s.source.size}B · sha:${s.source.sha256} · 导入于 ${s.source.imported_at}`;}
     $('#src-err').textContent=s.last_error||'';
     const st=await api('/api/v1/settings');const x=st.settings;
-    $('#s-nname').value=x.node_name||'';$('#s-max').value=x.max_ms;$('#s-int').value=x.interval_s;$('#s-kw').value=x.keywords;$('#s-ttl').value=x.ttl_s;$('#s-url').value=x.test_url;$('#s-auto').value=x.auto_test_s;$('#s-ipq').value=String(x.ipq_enabled??1);
+    $('#s-nname').value=x.node_name||'';$('#s-max').value=x.max_ms;$('#s-int').value=x.interval_s;$('#s-kw').value=x.keywords;$('#s-ttl').value=x.ttl_s;$('#s-url').value=x.test_url;$('#s-auto').value=x.auto_test_s;$('#s-ipq').value=String(x.ipq_enabled??1);$('#s-lmax').value=(x.listen_max??0);
     fillHubPickers();
     buildApi();
   }catch(e){toast('加载失败: '+e.message,1)}
@@ -266,7 +338,11 @@ async function loadNodes(){
   const max=STATUS.settings?STATUS.settings.max_ms:500;
   const kws=kw.toLowerCase().split(/[,，]/).map(s=>s.trim()).filter(Boolean);
   let rows=d.nodes.filter(n=>!kws.length||kws.some(k=>n.name.toLowerCase().includes(k)));
+  const srcSel=$('#src-filter');
+  if(srcSel&&srcSel.value)rows=rows.filter(n=>(n.source||'')===srcSel.value);
   if($('#only-ok')&&$('#only-ok').checked)rows=rows.filter(n=>typeof n.delay_ms==='number'&&n.delay_ms<=max);
+  const info=$('#src-filter-info');
+  if(info)info.textContent=(srcSel&&srcSel.value)?('该来源 '+rows.length+' 个节点'):'';
   if(NSORT.k){
     rows=[...rows].sort((a,b)=>{
       const x=a[NSORT.k],y=b[NSORT.k];
@@ -416,14 +492,63 @@ async function rotateNow(){
 async function doReload(){
   try{const d=await api('/api/v1/reload',{method:'POST',body:'{}'});toast(`重载成功：${d.nodes} 节点 / ${d.node_ports} 端口`);refresh()}catch(e){toast('重载失败: '+e.message,1)}
 }
-async function impUrl(){try{const d=await api('/api/v1/config/import_url',{method:'POST',body:JSON.stringify({url:$('#imp-url').value.trim()})});toast('导入成功：'+d.reload.nodes+' 节点');loadHistory();refresh()}catch(e){toast(e.message,1)}}
+async function impUrl(){try{const d=await api('/api/v1/config/import_url',{method:'POST',body:JSON.stringify({url:$('#imp-url').value.trim()})});toast((d.action==='updated'?'已更新来源：':'已新增来源：')+d.reload.nodes+' 节点');loadHistory();loadSources();refresh()}catch(e){toast(e.message,1)}}
 async function impFile(){
   const f=$('#imp-file').files[0];if(!f)return toast('先选文件',1);
   const buf=await f.arrayBuffer();
-  try{const d=await api('/api/v1/config/upload?name='+encodeURIComponent(f.name),{method:'POST',body:buf,headers:{'Content-Type':'application/octet-stream'}});toast('导入成功：'+d.reload.nodes+' 节点');loadHistory();refresh()}catch(e){toast(e.message,1)}
+  try{const d=await api('/api/v1/config/upload?name='+encodeURIComponent(f.name),{method:'POST',body:buf,headers:{'Content-Type':'application/octet-stream'}});toast((d.action==='updated'?'已更新来源：':'已新增来源：')+d.reload.nodes+' 节点');loadHistory();loadSources();refresh()}catch(e){toast(e.message,1)}
 }
-async function impPaste(){try{const d=await api('/api/v1/config/paste',{method:'POST',body:JSON.stringify({content:$('#imp-paste').value,name:$('#imp-paste-name').value.trim()||'paste.yaml'})});toast('导入成功：'+d.reload.nodes+' 节点');loadHistory();refresh()}catch(e){toast(e.message,1)}}
-async function impPath(){try{const d=await api('/api/v1/config/import_path',{method:'POST',body:JSON.stringify({path:$('#imp-path').value.trim()})});toast('导入成功：'+d.reload.nodes+' 节点');loadHistory();refresh()}catch(e){toast(e.message,1)}}
+async function impPaste(){try{const d=await api('/api/v1/config/paste',{method:'POST',body:JSON.stringify({content:$('#imp-paste').value,name:$('#imp-paste-name').value.trim()||'paste.yaml'})});toast((d.action==='updated'?'已更新来源：':'已新增来源：')+d.reload.nodes+' 节点');loadHistory();loadSources();refresh()}catch(e){toast(e.message,1)}}
+async function impPath(){try{const d=await api('/api/v1/config/import_path',{method:'POST',body:JSON.stringify({path:$('#imp-path').value.trim()})});toast((d.action==='updated'?'已更新来源：':'已新增来源：')+d.reload.nodes+' 节点');loadHistory();loadSources();refresh()}catch(e){toast(e.message,1)}}
+// 来源管理：每个订阅/配置文件是一条独立来源，导入只更新自己那条，
+// 合并后的节点在节点页按「[来源] 名称」分组，可整组启停。
+async function loadSources(){
+  let d;
+  try{d=await api('/api/v1/sources');}catch(e){$('#src-list').innerHTML=`<tr><td colspan="6" class="err">${esc(e.message)}</td></tr>`;return}
+  const list=d.sources||[];
+  $('#src-list').innerHTML=list.length?list.map(s=>{
+    const en=s.enabled!==false;
+    const url=s.url?`<span class="muted" style="font-size:11px;word-break:break-all">${esc(s.url)}</span>`:'<span class="muted">（本地导入）</span>';
+    const alive=s.alive_count??0,total=s.node_count??0;
+    return `<tr class="${en?'':'node-disabled'}"><td>${esc(s.name||s.id)}${en?'':' <span class="badge off">已停用</span>'}</td>`
+      +`<td>${total}</td><td class="${alive?'d-ok':'muted'}">${alive}</td>`
+      +`<td>${url}</td><td class="muted" style="font-size:11px">${esc(s.imported_at||'—')}</td>`
+      +`<td><button class="btn mini ${en?'gray':''}" onclick="toggleSource('${esc(s.id)}',${en?0:1})">${en?'停用':'启用'}</button> `
+      +`<button class="btn mini gray" onclick="removeSource('${esc(s.id)}','${esc(s.name||s.id)}')">删除</button></td></tr>`;
+  }).join(''):'<tr><td colspan="6" class="muted">还没有来源，用下面的方式导入一个</td></tr>';
+  // 节点页的来源筛选下拉同步
+  const sel=$('#src-filter');
+  if(sel){
+    const cur=sel.value;
+    sel.innerHTML='<option value="">全部来源</option>'+list.map(s=>`<option value="${esc(s.name||s.id)}">${esc(s.name||s.id)}（${s.node_count??0}）</option>`).join('');
+    sel.value=cur;
+  }
+}
+async function toggleSource(id,enable){
+  try{await api('/api/v1/sources/toggle',{method:'POST',body:JSON.stringify({id,enabled:!!enable})});
+    toast(enable?'已启用来源':'已停用来源');loadSources();loadNodes();refresh()}catch(e){toast(e.message,1)}
+}
+async function removeSource(id,name){
+  if(!confirm('删除来源「'+name+'」？\n该来源的节点会从合并配置里移除。历史版本里仍留有备份。'))return;
+  try{await api('/api/v1/sources/remove',{method:'POST',body:JSON.stringify({id})});
+    toast('已删除来源');loadSources();loadNodes();refresh()}catch(e){toast(e.message,1)}
+}
+async function refreshSources(){
+  toast('正在刷新订阅…');
+  try{const d=await api('/api/v1/sources/refresh',{method:'POST',body:JSON.stringify({})});
+    const rs=d.results||[];const bad=rs.filter(r=>!r.ok);
+    toast(bad.length?('刷新完成，'+bad.length+' 个失败'):('刷新完成，'+rs.length+' 个来源'));
+    loadSources();loadNodes();refresh()}catch(e){toast(e.message,1)}
+}
+// 批量启用/停用：作用范围是节点页的勾选集合，一次请求一次重载。
+async function bulkToggle(disable){
+  const names=[...SELECTED];
+  if(!names.length){toast('先勾选节点',1);return}
+  if(disable && !confirm('批量禁用 '+names.length+' 个节点？'))return;
+  try{const d=await api('/api/v1/nodes/bulk',{method:'POST',body:JSON.stringify({nodes:names,disabled:!!disable})});
+    toast((disable?'已禁用 ':'已启用 ')+d.changed+' 个节点');
+    clearSelection();loadNodes();refresh()}catch(e){toast(e.message,1)}
+}
 async function loadHistory(){
   try{const d=await api('/api/v1/config');
     $('#hist-body').innerHTML=d.history.length?d.history.map(h=>`<tr><td>${esc(h.file)}</td><td>${h.size}B</td><td><button class="btn mini gray" onclick="restore('${esc(h.file)}')">恢复</button></td></tr>`).join(''):'<tr><td colspan="3" class="muted">还没有历史</td></tr>';
@@ -431,7 +556,7 @@ async function loadHistory(){
 }
 async function restore(f){try{const d=await api('/api/v1/history/restore',{method:'POST',body:JSON.stringify({file:f})});toast('已恢复：'+d.reload.nodes+' 节点');refresh()}catch(e){toast(e.message,1)}}
 async function saveSettings(){
-  try{    await api('/api/v1/settings',{method:'POST',body:JSON.stringify({node_name:$('#s-nname').value,max_ms:+$('#s-max').value,interval_s:+$('#s-int').value,keywords:$('#s-kw').value,ttl_s:+$('#s-ttl').value,test_url:$('#s-url').value.trim(),auto_test_s:+$('#s-auto').value,ipq_enabled:+$('#s-ipq').value})});toast('已保存');refresh()}catch(e){toast(e.message,1)}
+  try{    await api('/api/v1/settings',{method:'POST',body:JSON.stringify({node_name:$('#s-nname').value,max_ms:+$('#s-max').value,interval_s:+$('#s-int').value,keywords:$('#s-kw').value,ttl_s:+$('#s-ttl').value,test_url:$('#s-url').value.trim(),auto_test_s:+$('#s-auto').value,ipq_enabled:+$('#s-ipq').value,listen_max:+$('#s-lmax').value})});toast('已保存');refresh()}catch(e){toast(e.message,1)}
 }
 async function loadLocal(){
   try{
@@ -495,8 +620,9 @@ export http_proxy=http://${ip}:7890 https_proxy=http://${ip}:7890
 # 7892：先按账号取粘性端口（同 key 恒定），也可直接用 7892 本身
 curl "${b}/api/v1/pick?key=账号ID" -H "X-Token: ${t}"   # 返回该账号专属节点与端口`;
 }
-refresh().then(()=>{loadNodes()}).catch(()=>{});
-loadHistory();
+// 初始加载由 boot() 负责（先验 token 再拉数据）；这里只准备静态内容，
+// 未登录就发请求会在控制台留下一串 401。
+if(localStorage.getItem('mpool_token'))loadHistory();
 </script>
 </body>
 </html>

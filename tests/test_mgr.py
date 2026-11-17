@@ -623,6 +623,67 @@ class TestNodeDisable(unittest.TestCase):
             self.assertEqual(dropped, set())
             self.assertEqual([x["name"] for x in doc["proxies"]], ["a", "b", "c"])
 
+    def test_group_emptied_by_disable_is_removed(self):
+        # mihomo 对「proxies 为空且没有 use」的组直接拒绝整份配置
+        # （proxy group[N]: `use` or `proxies` missing）。批量禁用把某个组
+        # 的成员全剔掉时，组本身也必须删掉，否则一次禁用就把网关打挂。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.disabled_nodes = {"a", "b", "c"}
+            doc = self._doc()
+            p._drop_disabled(doc)
+            self.assertEqual(doc["proxy-groups"], [])
+
+    def test_rules_pointing_at_removed_group_dropped(self):
+        # 组被删后，规则里指向它的目标就不存在了，mihomo 会报
+        # 「proxy [X] not found」并拒绝整份配置。这类规则必须一起剔除。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.disabled_nodes = {"a", "b", "c"}
+            doc = self._doc()
+            doc["rules"] = [
+                "DOMAIN-SUFFIX,x.com,PROXY",
+                "GEOIP,CN,DIRECT",
+                "MATCH,DIRECT",
+            ]
+            p._drop_disabled(doc)
+            self.assertEqual(doc["proxy-groups"], [])
+            self.assertEqual(doc["rules"], ["GEOIP,CN,DIRECT", "MATCH,DIRECT"])
+
+    def test_rules_for_surviving_group_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.disabled_nodes = {"a", "b"}
+            doc = self._doc()
+            doc["rules"] = ["DOMAIN-SUFFIX,x.com,PROXY", "MATCH,PROXY"]
+            p._drop_disabled(doc)
+            self.assertEqual(doc["rules"], ["DOMAIN-SUFFIX,x.com,PROXY", "MATCH,PROXY"])
+
+    def test_group_kept_when_use_present(self):
+        # 走 proxy-providers 的组没有 proxies 字段但有 use，不能删。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.disabled_nodes = {"a", "b", "c"}
+            doc = {
+                "proxies": [{"name": n, "type": "ss", "server": "1.1.1.1", "port": 443}
+                            for n in ("a", "b", "c")],
+                "proxy-groups": [
+                    {"name": "FROM_PROVIDER", "type": "select", "use": ["sub"]},
+                ],
+            }
+            p._drop_disabled(doc)
+            self.assertEqual([g["name"] for g in doc["proxy-groups"]], ["FROM_PROVIDER"])
+
+    def test_partial_disable_keeps_non_empty_group(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.disabled_nodes = {"a", "b"}
+            doc = self._doc()
+            p._drop_disabled(doc)
+            self.assertEqual([g["name"] for g in doc["proxy-groups"]], ["PROXY", "AUTO"])
+            for g in doc["proxy-groups"]:
+                self.assertEqual(g["proxies"], ["c"])
+
     def test_set_disable_persists_and_toggles(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._pool(d)
@@ -705,6 +766,48 @@ class TestSettings(unittest.TestCase):
                 p.update_settings({"max_ms": 10})
             with self.assertRaises(m.PoolError):
                 p.update_settings({"test_url": "ftp://x"})
+
+    def test_listen_max_defaults_to_env_value(self):
+        # 0 = 沿用 env；没设过就是 DEFAULT_SETTINGS 里的 0。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.env_listen_max = 32
+            p.listen_max = 32
+            p._apply_listen_max()
+            self.assertEqual(p.listen_max, 32)
+
+    def test_listen_max_setting_overrides_env(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.env_listen_max = 32
+            p.listen_max = 32
+            s = p.update_settings({"listen_max": 64})
+            self.assertEqual(s["listen_max"], 64)
+            self.assertEqual(p.listen_max, 64)
+
+    def test_listen_max_zero_falls_back_to_env(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.env_listen_max = 48
+            p.listen_max = 48
+            p.update_settings({"listen_max": 100})
+            self.assertEqual(p.listen_max, 100)
+            p.update_settings({"listen_max": 0})
+            self.assertEqual(p.listen_max, 48)
+
+    def test_listen_max_bounds(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.env_listen_max = 32
+            p.listen_max = 32
+            for bad in (-1, m.LISTEN_MAX_LIMIT + 1, "abc"):
+                with self.assertRaises(m.PoolError):
+                    p.update_settings({"listen_max": bad})
+            # 边界值本身可用
+            self.assertEqual(p.update_settings({"listen_max": 1})["listen_max"], 1)
+            self.assertEqual(
+                p.update_settings({"listen_max": m.LISTEN_MAX_LIMIT})["listen_max"],
+                m.LISTEN_MAX_LIMIT)
 
     def test_update_auto_test_s(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1104,6 +1207,201 @@ class TestExportConfig(unittest.TestCase):
             self.assertEqual(p.export_config(["home-01"], "a:b*c?")["filename"], "a_b_c.yaml")
             self.assertEqual(p.export_config(["home-01"], "sub.yml")["filename"], "sub.yml")
             self.assertEqual(p.export_config(["home-01"], "   ")["filename"], "mihomo-pool-export.yaml")
+
+
+class TestMultiSource(unittest.TestCase):
+    """多来源：叠加导入、按内容去重、按来源分组、批量启停。"""
+
+    def _pool(self, d):
+        p = m.Pool.__new__(m.Pool)
+        p.root = d
+        p.cfg_dir = os.path.join(d, "configs")
+        p.hist_dir = os.path.join(p.cfg_dir, "history")
+        p.sources_dir = os.path.join(p.cfg_dir, "sources")
+        p.sources_index_path = os.path.join(p.cfg_dir, "sources.json")
+        p.source_path = os.path.join(p.cfg_dir, "source.yaml")
+        p.disabled_nodes = set()
+        p._disabled_path = os.path.join(d, "disabled.json")
+        p.source_meta = None
+        p.source_groups = []
+        p.node_list = []
+        p.sources = []
+        p.log = lambda s: None
+        for x in (p.cfg_dir, p.hist_dir, p.sources_dir):
+            os.makedirs(x, exist_ok=True)
+        return p
+
+    @staticmethod
+    def _cfg(*names, prefix="hk"):
+        return ("proxies:\n" + "".join(
+            "  - {name: %s, type: ss, server: %s.example.com, port: 443,"
+            " cipher: aes-128-gcm, password: p}\n" % (n, prefix + str(i))
+            for i, n in enumerate(names)
+        ) + "rules:\n  - MATCH,DIRECT\n").encode()
+
+    def test_two_sources_are_stacked(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.add_source(self._cfg("hk-01", "hk-02", prefix="a"), "机场A.yaml")
+            p.add_source(self._cfg("jp-01", "jp-02", prefix="b"), "机场B.yaml")
+            self.assertEqual(len(p.sources), 2)
+            import yaml
+            doc = yaml.safe_load(open(p.source_path, encoding="utf-8"))
+            self.assertEqual(len(doc["proxies"]), 4)
+            groups = [g["name"] for g in doc["proxy-groups"]]
+            self.assertIn("[来源] 机场A.yaml", groups)
+            self.assertIn("[来源] 机场B.yaml", groups)
+            self.assertIn("汇总出口", groups)
+
+    def test_same_url_updates_instead_of_adding(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            url = "https://sub.example.com/a"
+            r1 = p.add_source(self._cfg("hk-01"), "a.yaml", url=url)
+            r2 = p.add_source(self._cfg("hk-02"), "a.yaml", url=url)
+            self.assertEqual(r1["action"], "added")
+            self.assertEqual(r2["action"], "updated")
+            self.assertEqual(len(p.sources), 1)
+            self.assertEqual(r1["source"]["id"], r2["source"]["id"])
+
+    def test_identical_content_updates_not_duplicates(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            data = self._cfg("hk-01")
+            r1 = p.add_source(data, "one.yaml")
+            r2 = p.add_source(data, "renamed.yaml")
+            self.assertEqual(r2["action"], "updated")
+            self.assertEqual(len(p.sources), 1)
+            self.assertEqual(r1["source"]["id"], r2["source"]["id"])
+
+    def test_same_node_in_two_sources_merged_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            node = {"name": "shared", "type": "ss", "server": "1.1.1.1",
+                    "port": 443, "cipher": "aes-128-gcm", "password": "p"}
+            import yaml
+            p.add_source(yaml.safe_dump({"proxies": [node]}).encode(), "a.yaml")
+            dup = dict(node, name="shared-renamed")
+            p.add_source(yaml.safe_dump({"proxies": [dup]}).encode(), "b.yaml")
+            doc = yaml.safe_load(open(p.source_path, encoding="utf-8"))
+            names = [x["name"] for x in doc["proxies"]]
+            self.assertEqual(names, ["shared"])
+
+    def test_disabled_source_excluded_from_merge(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.add_source(self._cfg("hk-01"), "a.yaml")
+            r = p.add_source(self._cfg("jp-01"), "b.yaml")
+            p.set_source_enabled(r["source"]["id"], False)
+            import yaml
+            doc = yaml.safe_load(open(p.source_path, encoding="utf-8"))
+            names = [x["name"] for x in doc["proxies"]]
+            self.assertEqual(names, ["hk-01"])
+
+    def test_remove_source_rebuilds_merge(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.add_source(self._cfg("hk-01"), "a.yaml")
+            r = p.add_source(self._cfg("jp-01"), "b.yaml")
+            p.remove_source(r["source"]["id"])
+            import yaml
+            doc = yaml.safe_load(open(p.source_path, encoding="utf-8"))
+            self.assertEqual([x["name"] for x in doc["proxies"]], ["hk-01"])
+            self.assertEqual(len(p.sources), 1)
+
+    def test_all_sources_disabled_is_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            r = p.add_source(self._cfg("hk-01"), "a.yaml")
+            with self.assertRaises(m.ConfigError):
+                p.set_source_enabled(r["source"]["id"], False)
+
+    def test_rules_pointing_at_missing_nodes_dropped(self):
+        # 来源 A 的规则指向来源 B 的组名，B 停用后这条规则必须丢，
+        # 否则 mihomo 会因为未知目标整份配置加载失败。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            cfg_a = ("proxies:\n"
+                     "  - {name: hk-01, type: ss, server: a.example.com, port: 443,"
+                     " cipher: aes-128-gcm, password: p}\n"
+                     "rules:\n  - DOMAIN,x.com,不存在的组\n  - MATCH,DIRECT\n").encode()
+            p.add_source(cfg_a, "a.yaml")
+            p.add_source(self._cfg("jp-01"), "b.yaml")
+            import yaml
+            doc = yaml.safe_load(open(p.source_path, encoding="utf-8"))
+            rules = doc["rules"]
+            self.assertFalse(any("不存在的组" in r for r in rules))
+            self.assertTrue(any(r.upper().startswith("MATCH,") for r in rules))
+
+    def test_bulk_disable_saves_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p._lock = threading.RLock()
+            p.node_list = ["a", "b", "c"]
+            res = p.set_nodes_disabled(["a", "b"], True)
+            self.assertEqual(res["changed"], 2)
+            self.assertEqual(p.disabled_nodes, {"a", "b"})
+            p.set_nodes_disabled(["a"], False)
+            self.assertEqual(p.disabled_nodes, {"b"})
+
+    def test_bulk_disable_empty_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            with self.assertRaises(m.PoolError):
+                p.set_nodes_disabled([], True)
+
+    def test_legacy_source_yaml_migrated_to_one_source(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            with open(p.source_path, "wb") as fh:
+                fh.write(self._cfg("legacy-01", "legacy-02"))
+            p._ensure_sources_migrated()
+            self.assertEqual(len(p.sources), 1)
+            self.assertEqual(p.sources[0]["name"], "source.yaml")
+
+    def test_migration_skipped_when_sources_exist(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.add_source(self._cfg("hk-01"), "a.yaml")
+            with open(p.source_path, "wb") as fh:
+                fh.write(self._cfg("legacy-01"))
+            p._ensure_sources_migrated()
+            self.assertEqual(len(p.sources), 1)
+            self.assertEqual(p.sources[0]["name"], "a.yaml")
+
+    def test_sources_view_counts_alive_from_persisted_delays(self):
+        # 进程刚起来时内存缓存是空的，若只认内存就会把一屋子活节点报成
+        # 「存活 0」，运维据此会误停一个正常来源。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.add_source(self._cfg("hk-01", "hk-02", prefix="a"), "a.yaml")
+            p.node_list = ["hk-01", "hk-02"]
+            p.cache = m.DelayCache()
+            p.settings = dict(m.DEFAULT_SETTINGS)
+            # 整数=测通，'x'=超时。超时的不能算存活。
+            p.last_delays = {"hk-01": 120, "hk-02": "x"}
+            view = p.sources_view()
+            self.assertEqual(view[0]["node_count"], 2)
+            self.assertEqual(view[0]["alive_count"], 1)
+            self.assertEqual(view[0]["loaded_count"], 2)
+
+    def test_source_file_name_has_single_extension(self):
+        # _source_file() 会补 .yaml，来源 id 若自带扩展名就成了 x.yaml.yaml。
+        with tempfile.TemporaryDirectory() as d:
+            p = self._pool(d)
+            p.add_source(self._cfg("hk-01", prefix="a"), "sub.yaml")
+            p.add_source(self._cfg("jp-01", prefix="b"), "other.yml")
+            names = sorted(os.listdir(p.sources_dir))
+            self.assertEqual(names, ["other.yaml", "sub.yaml"])
+            for n in names:
+                self.assertFalse(n.endswith(".yaml.yaml") or n.endswith(".yml.yaml"))
+
+    def test_node_fingerprint_ignores_name(self):
+        a = {"name": "x", "type": "ss", "server": "1.1.1.1", "port": 443}
+        b = {"name": "y", "type": "ss", "server": "1.1.1.1", "port": 443}
+        c = {"name": "x", "type": "ss", "server": "2.2.2.2", "port": 443}
+        self.assertEqual(m.Pool.node_fingerprint(a), m.Pool.node_fingerprint(b))
+        self.assertNotEqual(m.Pool.node_fingerprint(a), m.Pool.node_fingerprint(c))
 
 
 if __name__ == "__main__":

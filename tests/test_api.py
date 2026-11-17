@@ -55,6 +55,8 @@ class FakePool:
     def rotate_now(self, keywords=None, max_ms=None):
         return None if keywords == "nowhere" else "a"
 
+    listen_max = 32
+
     def update_settings(self, patch):
         raise m.PoolError("max_ms 需在 50-10000 之间")
 
@@ -71,6 +73,31 @@ class FakePool:
         if b"broken" in data:
             raise m.ConfigError("YAML 解析失败")
         return self.source_meta
+
+    sources = []
+
+    def add_source(self, data, name="upload.yaml", url="", source_id=None, merge=True):
+        if b"broken" in data:
+            raise m.ConfigError("YAML 解析失败")
+        return {"source": self.source_meta, "action": "added"}
+
+    def sources_view(self):
+        return list(self.sources)
+
+    def remove_source(self, source_id):
+        if source_id != "s1":
+            raise m.PoolError("来源不存在: %s" % source_id)
+        return {"removed": source_id, "remaining": 0}
+
+    def set_source_enabled(self, source_id, enabled):
+        if source_id != "s1":
+            raise m.PoolError("来源不存在: %s" % source_id)
+        return {"source": {"id": source_id, "enabled": enabled}}
+
+    def set_nodes_disabled(self, names, disabled):
+        if not names:
+            raise m.PoolError("至少选择一个节点")
+        return {"changed": len(names), "disabled": bool(disabled)}
 
     def export_config(self, names, filename=""):
         if not names:
@@ -118,6 +145,22 @@ class TestApi(unittest.TestCase):
         code, data = self.req("/health", token=None)
         self.assertEqual(code, 200)
         self.assertTrue(data["ok"])
+
+    def test_auth_accepts_correct_token(self):
+        # 面板登录门禁靠这个端点：对了才放行，错了要明确 401。
+        code, data = self.req("/api/v1/auth")
+        self.assertEqual(code, 200)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["auth_required"])
+
+    def test_auth_rejects_wrong_token(self):
+        code, data = self.req("/api/v1/auth", token="wrong")
+        self.assertEqual(code, 401)
+        self.assertFalse(data["ok"])
+
+    def test_auth_rejects_missing_token(self):
+        code, data = self.req("/api/v1/auth", token=None)
+        self.assertEqual(code, 401)
 
     def test_api_requires_token(self):
         code, _ = self.req("/api/v1/status", token=None)

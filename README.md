@@ -12,7 +12,7 @@
 | 7890 | **固定出口**：面板「设为固定」后一直走该节点，重载自动恢复 |
 | 7891 | **动态轮换**：每 `interval_s` 秒在「关键词命中 + 延迟 ≤ max_ms」节点里随机换一个 |
 | 7892 | **分配出口**：API 传 key（如账号 ID），同一 key 稳定映射同一节点 |
-| 17901+ | **逐节点端口**：每个节点一个独享 mixed 端口（默认最多 32 个），供 Hub/CPA 按端口绑定账号。分配结果落在 `runtime/port_assignments.json`，重载与重启后沿用，不会因测速延迟变化而漂移 |
+| 17901+ | **逐节点端口**：每个节点一个独享 mixed 端口（默认最多 32 个），供 Hub/CPA 按端口绑定账号。分配结果落在 `runtime/port_assignments.json`，重载与重启后沿用，不会因测速延迟变化而漂移。数量可在面板「设置 → 逐节点端口数量」调整（1-512，0=沿用 `.env` 的 `MPOOL_LISTEN_MAX`），改完自动重载并重新分配 |
 | 7893 | **本地直连 HTTP/SOCKS5**（无认证，出口=本机 DIRECT），`MPOOL_LOCAL_PORT` 可改 |
 | 17990 | **本地直连 vmess 节点**（UUID 认证，出口=本机 DIRECT），给 clash 客户端当节点用，`MPOOL_LOCAL_VLESS_PORT` 可改 |
 | 9090 | mihomo external-controller（仅 127.0.0.1，随机 secret，位于 `runtime/secret`） |
@@ -44,11 +44,35 @@ curl "http://<IP>:8006/api/v1/pick?key=账号ID" -H "X-Token: <token>"
 ```bash
 ./start.sh          # 首次会自动建 venv；服务起在 8006
 # 打开面板 http://127.0.0.1:8006/ ，Token 见 .env
-# 「导入」页用四种方式之一导入你的 Clash/mihomo 配置 → 自动重载
+# 「导入」页用四种方式之一导入 Clash/mihomo 配置 → 自动重载
+# 可以导入多份，按来源叠加；同一订阅重复导入是更新而不是新增
 ./stop.sh           # 连同 mihomo 子进程一起停
 ```
 
 配置导入后自动做两件事：剔除用户配置里的入站声明（`port/mixed-port/socks-port/listeners`，源文件保留不动），注入 HUB-FIXED/HUB-ROTATE/HUB-ASSIGN 三个选择组和全部监听端口，然后热重载（`PUT /configs?force=true`）。每次导入留档到 `configs/history/`，可一键恢复。
+
+### 多来源叠加与分组
+
+导入不再整体替换，而是**按来源叠加**：每个配置文件/订阅单独存一份（`configs/sources/<id>.yaml`，索引 `configs/sources.json`），合并结果写回 `configs/source.yaml` 供 mihomo 加载。
+
+- **同一地址或同一内容 = 更新，不是新增**。先按订阅 URL 命中，再按内容 sha256 命中；每天刷新的机场订阅只占一条记录，节点不会重复堆积。
+- **跨来源按内容去重**。指纹取节点除 `name` 外的全部字段，同一个节点换个名字重复导入只保留一份，端口也不会被重复分配。
+- **每个来源自动生成一个 `[来源] <名称>` 分组**，外加一个 `汇总出口` 组装全部节点，面板上按组切换即可。
+- **批量启停**：面板节点页勾选后「批量禁用 / 批量启用」，一次请求一次重载；停用整个来源（`sources/toggle`）会连同它的分组和规则一起摘掉。
+- **停用来源后，指向它的规则自动剔除**。mihomo 遇到未知规则目标会拒绝整份配置，剔规则比改写成 DIRECT 更安全：流量落回末尾 MATCH 继续走代理，不会悄悄变成直连。
+- **按来源筛选节点**：节点页「按来源」下拉只显示该来源的节点，配合全选即可整组操作。
+
+来源相关接口：
+
+```
+GET  /api/v1/sources                            来源列表（节点数 / 已载入 / 实测存活）
+POST /api/v1/sources/toggle {"id":"...","enabled":false}   停用/启用来源
+POST /api/v1/sources/remove {"id":"..."}        删除来源（历史版本仍留档）
+POST /api/v1/sources/refresh {"id":"可选"}      按保存的订阅地址重新拉取（只刷新有 URL 的）
+POST /api/v1/nodes/bulk {"nodes":[...],"disabled":true}    批量禁用/启用节点
+```
+
+老部署升级后，启动时会把原有 `configs/source.yaml` 自动收编成一个来源，不用重新导入。
 
 ## 分配 API
 
@@ -59,7 +83,7 @@ curl "http://<IP>:8006/api/v1/pick?key=账号ID" -H "X-Token: <token>"
 - `POST /api/v1/nodes/export {"nodes": ["节点A", "节点B"], "filename": "..."}`：**按勾选拆分导出配置**——把选中的节点拆成一份独立 clash 配置（`proxies` + 一个 `PROXY` 选择组 + `MATCH,PROXY`），供**别的 pool** 导入使用。导出内容**不含**本 pool 的入站声明（`listeners` / `port` / `mixed-port` 等）与 `HUB-*` 组，避免导到别处撞端口或指向不存在的节点。节点名按勾选顺序保留、重复自动去重；名字不存在直接 409（不静默跳过，否则会导出一份「少一个节点」的配置）。源配置只有 `proxy-providers` 时无法按名字拆分，返回 409 并说明原因。面板节点页勾选后点「导出所选配置」即下载，文件名带日期与节点数。
 - 面板「重载配置」= **一键按综合分重排全部端口**（钉住的除外）；每轮测速后死节点端口自动回收、按综合分补给。
 
-鉴权三选一：`Authorization: Bearer <token>` / `X-Token: <token>` / `?token=`。
+鉴权三选一：`Authorization: Bearer <token>` / `X-Token: <token>` / `?token=`。面板打开时先要求输入 Token，`GET /api/v1/auth` 校验通过才进入；输错当场提示，不再出现「进去了但满屏报错」的情况。
 
 ```
 GET /api/v1/pick?keywords=香港,家庭&max_ms=500   随机取一个门限内出口（默认关键词/门限取设置）
@@ -72,7 +96,10 @@ POST /api/v1/fixed {"node":"名字"}               设固定出口
 POST /api/v1/rotate {"keywords":null,"max_ms":null}  立即轮换一次
 GET  /api/v1/status                              运行状态
 GET/POST /api/v1/settings                        max_ms / interval_s / keywords / ttl_s / test_url
-POST /api/v1/config/import_url | import_path | paste | upload   四种导入
+POST /api/v1/config/import_url | import_path | paste | upload   四种导入（叠加为来源，同源更新不新增）
+GET  /api/v1/sources                             来源列表（节点数/存活数/启用状态）
+POST /api/v1/sources/toggle | remove | refresh   停用/删除/刷新来源
+POST /api/v1/nodes/bulk {"nodes":[...],"disabled":true}      批量禁用/启用节点
 POST /api/v1/reload                              重新注入并热重载
 POST /api/v1/history/restore {"file":"..."}      恢复历史版本
 ```
@@ -124,7 +151,7 @@ CF 桥接端口（8444-8446）由平台自动映射为各自的 `<端口>-<域�
 
 ## 注意
 
-- 首次导入含 `GEOIP` 规则的机场配置时，mihomo 会自动下载 geoip 数据库（走 GitHub），第一次重载会慢几秒。
-- 运行时配置 `runtime/config.yaml` 是生成的，别手改；改 `configs/source.yaml` 或重新导入后 reload。
+- 首次导入含 `GEOIP` 规则的机场配置时，mihomo 会自动下载 geoip 数据库（走 GitHub），第一次重载会慢几秒。**离线/被墙环境**会报 `can't download MMDB` 并让整份配置加载失败，此时把 `geoip.metadb`（8.4MB）与 `geosite.dat`（4.4MB）预先放到 `runtime/` 即可，mihomo 会优先读本地文件。
+- 运行时配置 `runtime/config.yaml` 是生成的，别手改；`configs/source.yaml` 也是合并产物，改来源请用面板或 `configs/sources/` 下的单文件。
 - 日志：`runtime/service.log`（服务）+ `runtime/mihomo.log`（内核）。
-- 测试：`.venv/bin/python tests/run_all.py`（103 例）。
+- 测试：`.venv/bin/python tests/run_all.py`（144 例）。
